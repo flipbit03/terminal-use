@@ -117,7 +117,7 @@ pub async fn run_daemon() -> Result<()> {
     let idle_timeout = std::env::var("TU_IDLE_TIMEOUT")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(300);
+        .unwrap_or(28800); // 8 hours
     let idle_timeout_dur = Duration::from_secs(idle_timeout);
 
     loop {
