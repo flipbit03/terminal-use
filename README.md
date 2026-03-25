@@ -1,8 +1,14 @@
 # terminal-use (`tu`)
 
-Headless virtual terminal for AI agents. Spawn terminal apps, read the screen, send keystrokes. No GUI, no X server, no display needed.
+Headless virtual terminal for AI agents. Spawn interactive terminal apps, read the screen, send keystrokes. No GUI, no X server, no display needed.
 
 `tu` is to terminal applications what [agent-browser](https://github.com/vercel-labs/agent-browser) is to web pages.
+
+## Demo
+
+An AI agent playing NetHack — character creation, dungeon exploration, combat — driven entirely through `tu`:
+
+https://github.com/user-attachments/assets/8dd87972-2ef5-4104-9074-52b6ee528e08
 
 ## Install
 
@@ -18,95 +24,28 @@ From source:
 cargo install terminal-use
 ```
 
-## Quick start
+To update:
 
 ```bash
-# Spawn a process in a virtual terminal
-tu run htop
-
-# Read the screen
-tu screenshot
-
-# Send keystrokes
-tu press F2
-tu press Down Down Down Enter
-tu type "hello world"
-
-# Watch it live (read-only viewer)
-tu monitor
-
-# Clean up
-tu kill
+tu self update
 ```
 
-## How it works
-
-`tu` wraps a headless PTY + [vt100](https://crates.io/crates/vt100) terminal emulator behind a CLI. A background daemon manages sessions — each CLI invocation is stateless.
+## Add to your agent
 
 ```
-tu CLI ──→ Unix socket (JSON) ──→ daemon ──→ PTY + vt100 emulator
+# terminal-use (`tu`)
+
+Some programs (htop, vim, mc, dialog-based installers, ncurses UIs) need a real
+terminal to render their interface — you can't just pipe stdin/stdout. Use `tu`
+to run them in a virtual terminal, screenshot the screen and send keystrokes.
+Run `tu usage` before the first interaction for the full command reference.
 ```
 
-The daemon auto-starts on first use and auto-exits after 5 minutes of inactivity.
-
-## Commands
-
-```
-tu run <cmd> [args...]         Spawn a process in a virtual terminal
-tu kill [--name <s>]           Kill session
-tu list                        List active sessions
-tu status [--name <s>]         Session info
-
-tu screenshot [--name <s>]     Plain text screen dump
-tu cursor [--name <s>]         Cursor position (row,col)
-tu scrollback [--name <s>]     Scrollback buffer
-
-tu type <text> [--name <s>]    Type literal text
-tu press <key>... [--name <s>] Send keystrokes
-tu paste <text> [--name <s>]   Bracketed paste
-
-tu resize <CxR> [--name <s>]   Resize terminal
-tu wait [--name <s>]           Wait for screen condition
-
-tu monitor [--name <s>]        Live read-only viewer
-tu usage                       LLM-friendly command reference
-```
-
-Run `tu usage` for the full reference (designed to be <1000 tokens for LLM consumption).
-
-## Defaults
-
-- **Terminal size**: 120x40
-- **TERM**: `xterm-256color`
-- **Session name**: `default` (unless `--name` specified)
-- **Output**: Human-readable if TTY, JSON if piped
-
-## Keys
-
-```bash
-tu press Enter                    # Single key
-tu press Down Down Down Enter     # Multiple keys in sequence
-tu press Ctrl+C                   # Modifier combos
-tu press Alt+F                    # Alt prefix
-tu press F5                       # Function keys
-tu press Shift+Tab                # Shift combos
-```
-
-Full list: `Up Down Left Right Home End PageUp PageDown Backspace Delete Insert Tab Enter Space Escape F1-F12` plus `Ctrl+`, `Alt+`, `Shift+` modifiers.
-
-## Named sessions
-
-```bash
-tu run htop --name monitoring
-tu run vim --name editor
-tu screenshot --name monitoring
-tu press :wq Enter --name editor
-tu monitor                        # ← → to switch between sessions
-```
+That's it!
 
 ## `tu monitor`
 
-Live read-only viewer for humans to watch what an agent is doing:
+Open a separate terminal and watch what your agent is doing in real time:
 
 ```bash
 tu monitor                        # Watch the default session
@@ -118,16 +57,22 @@ tu monitor --name nethack         # Watch a specific session
 - Handles terminal resize
 - Ctrl+C to detach
 
-## For AI agents
+## How it works
 
-Add to your agent's tools/skills:
+`tu` wraps a headless PTY + [vt100](https://crates.io/crates/vt100) terminal emulator behind a CLI. A background daemon manages sessions — each CLI invocation is stateless.
 
 ```
-When you need to interact with a terminal application, use `tu`.
-Run `tu usage` to see the full command reference.
+tu CLI --> Unix socket (JSON) --> daemon --> PTY + vt100 emulator
 ```
 
-The agent runs `tu usage`, gets a <1000 token cheatsheet, and is fully equipped.
+The daemon auto-starts on first use and auto-exits after 8 hours of inactivity.
+
+## Defaults
+
+- **Terminal size**: 120x40
+- **TERM**: `xterm-256color`
+- **Session name**: `default` (unless `--name` specified)
+- **Output**: Human-readable if TTY, JSON for the agent (non-interactive terminal)
 
 ## License
 
