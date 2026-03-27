@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use regex::Regex;
+use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
 use crate::daemon::protocol::{Request, Response, SessionInfo, TermSize};
@@ -61,15 +62,8 @@ impl SessionManager {
 
             Request::Resize { name, size } => self.handle_resize(&name, size).await,
 
-            Request::Wait {
-                name,
-                stable_ms,
-                text_pattern,
-                timeout_ms,
-            } => {
-                self.handle_wait(&name, stable_ms, text_pattern, timeout_ms)
-                    .await
-            }
+            // Wait is handled directly in server.rs to avoid holding the manager lock
+            Request::Wait { .. } => unreachable!("Wait should be handled in server.rs"),
 
             Request::Shutdown => {
                 // Kill all sessions
@@ -89,9 +83,26 @@ impl SessionManager {
         self.last_activity.elapsed()
     }
 
+    /// Record that activity just happened (used by wait handler in server.rs).
+    pub fn touch(&mut self) {
+        self.last_activity = Instant::now();
+    }
+
     /// Number of active sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Get a clone of the session's vt100 parser and its terminal size.
+    /// Used by the wait handler in server.rs to read screenshots without holding
+    /// the manager lock.
+    pub fn get_session_parser(
+        &self,
+        name: &str,
+    ) -> Option<(Arc<Mutex<vt100::Parser>>, TermSize)> {
+        self.sessions
+            .get(name)
+            .map(|s| (s.parser.clone(), s.size.clone()))
     }
 
     fn allocate_name(&self, requested: Option<String>) -> String {
@@ -329,73 +340,4 @@ impl SessionManager {
         }
     }
 
-    async fn handle_wait(
-        &mut self,
-        name: &str,
-        stable_ms: Option<u64>,
-        text_pattern: Option<String>,
-        timeout_ms: u64,
-    ) -> Response {
-        // Verify session exists
-        if !self.sessions.contains_key(name) {
-            return Response::Error {
-                message: format!("Session {name:?} not found"),
-            };
-        }
-
-        let compiled_regex = if let Some(ref pat) = text_pattern {
-            match Regex::new(pat) {
-                Ok(re) => Some(re),
-                Err(e) => {
-                    return Response::Error {
-                        message: format!("Invalid regex {pat:?}: {e}"),
-                    }
-                }
-            }
-        } else {
-            None
-        };
-
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let stable_duration = stable_ms.map(Duration::from_millis);
-        let mut last_content: Option<String> = None;
-        let mut stable_since: Option<Instant> = None;
-
-        loop {
-            if Instant::now() >= deadline {
-                return Response::Error {
-                    message: "Wait timed out".into(),
-                };
-            }
-
-            let session = self.sessions.get(name).unwrap();
-            let content = session.screenshot_text().await;
-
-            // Check text pattern
-            if let Some(ref re) = compiled_regex {
-                if re.is_match(&content) {
-                    return Response::Ok;
-                }
-            }
-
-            // Check stability
-            if let Some(stable_dur) = stable_duration {
-                match &last_content {
-                    Some(prev) if prev == &content => {
-                        if let Some(since) = stable_since {
-                            if since.elapsed() >= stable_dur {
-                                return Response::Ok;
-                            }
-                        }
-                    }
-                    _ => {
-                        last_content = Some(content);
-                        stable_since = Some(Instant::now());
-                    }
-                }
-            }
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
 }
