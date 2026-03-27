@@ -8,6 +8,9 @@ Headless virtual terminal for AI agents. Binary is called `tu`. See issue #1 for
 cargo build          # dev build
 cargo build --release
 cargo test           # run unit tests
+cargo fmt --check    # check formatting (CI enforces this)
+cargo clippy -- -D warnings  # lint (CI enforces this)
+RUSTDOCFLAGS="-Dwarnings" cargo doc --all-features --no-deps  # doc lint (CI enforces this)
 ```
 
 ## Architecture
