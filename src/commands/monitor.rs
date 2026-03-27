@@ -343,6 +343,12 @@ fn draw_frame(
             let dashes = "─".repeat(frame_width.saturating_sub(2));
             write!(out, "\x1b[{row};1H\x1b[2K\x1b[90m└{dashes}┘\x1b[0m",)?;
         }
+        row += 1;
+    }
+
+    // Clear any remaining rows below the frame
+    if row <= term_rows {
+        write!(out, "\x1b[{row};1H\x1b[J")?;
     }
 
     out.flush()?;
