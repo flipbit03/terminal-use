@@ -96,10 +96,7 @@ impl SessionManager {
     /// Get a clone of the session's vt100 parser and its terminal size.
     /// Used by the wait handler in server.rs to read screenshots without holding
     /// the manager lock.
-    pub fn get_session_parser(
-        &self,
-        name: &str,
-    ) -> Option<(Arc<Mutex<vt100::Parser>>, TermSize)> {
+    pub fn get_session_parser(&self, name: &str) -> Option<(Arc<Mutex<vt100::Parser>>, TermSize)> {
         self.sessions
             .get(name)
             .map(|s| (s.parser.clone(), s.size.clone()))
@@ -339,5 +336,4 @@ impl SessionManager {
             },
         }
     }
-
 }
