@@ -208,7 +208,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, manager: &Mutex<Sessi
 
 /// Handle the Wait request without holding the SessionManager lock during the
 /// polling loop. We briefly lock the manager to look up the session's parser
-/// and size, then drop the lock and poll using the Arc<Mutex<Parser>> directly.
+/// and size, then drop the lock and poll using the `Arc<Mutex<Parser>>` directly.
 async fn handle_wait(
     manager: &Mutex<SessionManager>,
     name: &str,
