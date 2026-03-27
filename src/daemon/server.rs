@@ -2,10 +2,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 
 use crate::daemon::manager::SessionManager;
 use crate::daemon::protocol::{Request, Response};
@@ -179,7 +180,17 @@ async fn handle_connection(stream: tokio::net::UnixStream, manager: &Mutex<Sessi
 
     let is_shutdown = matches!(request, Request::Shutdown);
 
-    let response = {
+    // Handle Wait outside the manager lock to avoid blocking other requests
+    // during the polling loop.
+    let response = if let Request::Wait {
+        name,
+        stable_ms,
+        text_pattern,
+        timeout_ms,
+    } = request
+    {
+        handle_wait(manager, &name, stable_ms, text_pattern, timeout_ms).await
+    } else {
         let mut mgr = manager.lock().await;
         mgr.handle(request).await
     };
@@ -193,4 +204,112 @@ async fn handle_connection(stream: tokio::net::UnixStream, manager: &Mutex<Sessi
         tokio::time::sleep(Duration::from_millis(100)).await;
         std::process::exit(0);
     }
+}
+
+/// Handle the Wait request without holding the SessionManager lock during the
+/// polling loop. We briefly lock the manager to look up the session's parser
+/// and size, then drop the lock and poll using the `Arc<Mutex<Parser>>` directly.
+async fn handle_wait(
+    manager: &Mutex<SessionManager>,
+    name: &str,
+    stable_ms: Option<u64>,
+    text_pattern: Option<String>,
+    timeout_ms: u64,
+) -> Response {
+    // Briefly lock the manager to validate the session and get a reference to its parser.
+    let (parser, size) = {
+        let mut mgr = manager.lock().await;
+        mgr.touch();
+        match mgr.get_session_parser(name) {
+            Some(refs) => refs,
+            None => {
+                return Response::Error {
+                    message: format!("Session {name:?} not found"),
+                }
+            }
+        }
+    };
+
+    let compiled_regex = if let Some(ref pat) = text_pattern {
+        match Regex::new(pat) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                return Response::Error {
+                    message: format!("Invalid regex {pat:?}: {e}"),
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let stable_duration = stable_ms.map(Duration::from_millis);
+    let mut last_content: Option<String> = None;
+    let mut stable_since: Option<Instant> = None;
+
+    loop {
+        if Instant::now() >= deadline {
+            return Response::Error {
+                message: "Wait timed out".into(),
+            };
+        }
+
+        // Read the screenshot using the session's parser directly (no manager lock needed).
+        let content = screenshot_text_from_parser(&parser, &size).await;
+
+        // Check text pattern
+        if let Some(ref re) = compiled_regex {
+            if re.is_match(&content) {
+                return Response::Ok;
+            }
+        }
+
+        // Check stability
+        if let Some(stable_dur) = stable_duration {
+            match &last_content {
+                Some(prev) if prev == &content => {
+                    if let Some(since) = stable_since {
+                        if since.elapsed() >= stable_dur {
+                            return Response::Ok;
+                        }
+                    }
+                }
+                _ => {
+                    last_content = Some(content);
+                    stable_since = Some(Instant::now());
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Read the screen contents as plain text from a parser, mirroring Session::screenshot_text().
+async fn screenshot_text_from_parser(
+    parser: &Mutex<vt100::Parser>,
+    size: &crate::daemon::protocol::TermSize,
+) -> String {
+    let parser = parser.lock().await;
+    let screen = parser.screen();
+    let mut lines = Vec::with_capacity(size.rows as usize);
+    for row in 0..size.rows {
+        let mut line = String::new();
+        for col in 0..size.cols {
+            let cell = screen.cell(row, col).unwrap();
+            let ch = cell.contents();
+            if ch.is_empty() {
+                line.push(' ');
+            } else {
+                line.push_str(&ch);
+            }
+        }
+        let trimmed = line.trim_end();
+        lines.push(trimmed.to_string());
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
