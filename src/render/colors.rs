@@ -1,7 +1,18 @@
+//! Xterm-256color palette and terminal-to-RGBA color conversion.
+//!
+//! The palette values match the standard xterm-256color definition: 16 named colors,
+//! a 6x6x6 color cube (indices 16..=231), and a 24-step grayscale ramp (232..=255).
+//! No theme customization is supported — these are the canonical defaults.
+
 use image::Rgba;
 
 use crate::render::screen::Color;
 
+/// Convert a terminal [`Color`] to an `image::Rgba` pixel value.
+///
+/// `is_foreground` controls the fallback for [`Color::Default`]: white for foreground
+/// text, black for background. This matches the standard dark-on-light terminal
+/// convention (white text on a black background).
 pub fn color_to_rgba(color: Color, is_foreground: bool) -> Rgba<u8> {
     match color {
         Color::Default => {
@@ -16,6 +27,10 @@ pub fn color_to_rgba(color: Color, is_foreground: bool) -> Rgba<u8> {
     }
 }
 
+/// Standard xterm-256color palette as opaque RGBA values.
+///
+/// Indices 0..=15 are the 16 named ANSI colors, 16..=231 are the 6x6x6 color cube,
+/// and 232..=255 are the 24-step grayscale ramp.
 pub static COLOR_256: [Rgba<u8>; 256] = [
     Rgba([0, 0, 0, 255]),
     Rgba([128, 0, 0, 255]),

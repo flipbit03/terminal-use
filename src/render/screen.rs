@@ -1,7 +1,12 @@
+/// Terminal color value, decoupled from `vt100::Color` so it can be owned, cloned, and
+/// used outside of a parser borrow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
+    /// The terminal's default foreground or background (context-dependent).
     Default,
+    /// An index into the xterm-256color palette (0..=255).
     Indexed(u8),
+    /// A direct 24-bit RGB color.
     Rgb(u8, u8, u8),
 }
 
@@ -15,6 +20,10 @@ impl From<vt100::Color> for Color {
     }
 }
 
+/// SGR text attributes for a single cell.
+///
+/// `bold`, `italic`, and `underline` are captured for completeness but the image renderer
+/// currently only acts on `inverse` (swapping foreground/background colors).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CellAttributes {
     pub bold: bool,
@@ -23,12 +32,20 @@ pub struct CellAttributes {
     pub inverse: bool,
 }
 
+/// A single character cell extracted from the vt100 screen.
+///
+/// Wide (CJK) characters occupy two columns. The first column holds the character
+/// content; the second is a continuation cell with `is_wide_continuation` set and an
+/// empty `contents` string. The image renderer skips continuation cells to avoid
+/// double-drawing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     pub contents: String,
     pub fg: Color,
     pub bg: Color,
     pub attrs: CellAttributes,
+    /// True for the trailing column of a wide character. The renderer must skip
+    /// text drawing for these cells but still paint the background.
     pub is_wide_continuation: bool,
 }
 
@@ -44,6 +61,14 @@ impl Default for Cell {
     }
 }
 
+/// An owned, `Send`-safe snapshot of the vt100 emulator's visible screen.
+///
+/// This is the abstraction boundary between the daemon's parser (which holds a borrowed,
+/// non-`Send` `vt100::Screen`) and the render pipeline. Construct via
+/// [`ScreenSnapshot::from_vt100`], then pass to the text or image renderers.
+///
+/// The grid is stored row-major: `cells[row][col]`. Dimensions are guaranteed to match
+/// the parser's size at the time of extraction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenSnapshot {
     rows: u16,
@@ -52,6 +77,11 @@ pub struct ScreenSnapshot {
 }
 
 impl ScreenSnapshot {
+    /// Extract an owned snapshot from a borrowed vt100 screen.
+    ///
+    /// Iterates every cell in the visible area and copies its content, colors, and
+    /// attributes. Cells that the parser reports as `None` (which shouldn't happen
+    /// for in-bounds coordinates) are replaced with [`Cell::default`].
     pub fn from_vt100(screen: &vt100::Screen) -> Self {
         let (rows, cols) = screen.size();
         let mut cells = Vec::with_capacity(rows as usize);

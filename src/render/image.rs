@@ -1,3 +1,14 @@
+//! Rasterized terminal screenshot renderer.
+//!
+//! Converts a [`ScreenSnapshot`] into a pixel image by drawing each cell's background
+//! rectangle and glyph using a system monospace font. The output is a standard RGBA image
+//! that can be saved as PNG or JPEG.
+//!
+//! Font discovery happens via `font-kit`'s [`SystemSource`], which queries the OS font
+//! registry for a monospace family (or a user-specified family). The font is loaded fresh
+//! on every render call — there is no cross-invocation cache, which is acceptable for a
+//! short-lived CLI process but would need revisiting for batch use.
+
 use std::path::Path;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
@@ -11,6 +22,10 @@ use imageproc::rect::Rect;
 use crate::render::colors::color_to_rgba;
 use crate::render::screen::ScreenSnapshot;
 
+/// Rendering parameters for a terminal screenshot.
+///
+/// All sizes are in CSS-style pixels. `line_height` is a multiplier on `font_size`
+/// (1.2 = 120% line spacing).
 #[derive(Debug, Clone)]
 pub struct ScreenshotConfig {
     pub font_name: Option<String>,
@@ -28,12 +43,17 @@ impl Default for ScreenshotConfig {
     }
 }
 
+/// Builder for rendering a terminal screen to a raster image.
+///
+/// Construct with [`Screenshot::new`], optionally override font settings with the
+/// builder methods, then call [`Screenshot::save`] or [`Screenshot::to_png`].
 pub struct Screenshot {
     screen: ScreenSnapshot,
     config: ScreenshotConfig,
 }
 
 impl Screenshot {
+    /// Create a screenshot renderer for the given screen snapshot with default config.
     pub fn new(screen: ScreenSnapshot) -> Self {
         Self {
             screen,
@@ -41,20 +61,29 @@ impl Screenshot {
         }
     }
 
+    /// Override the font family. If not called, the system's default monospace font is used.
     pub fn font_name(mut self, name: &str) -> Self {
         self.config.font_name = Some(name.to_string());
         self
     }
 
+    /// Override the font size in pixels (default: 14.0).
     pub fn font_size(mut self, size: f32) -> Self {
         self.config.font_size = size;
         self
     }
 
+    /// Rasterize the screen to an in-memory RGBA image.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the system font cannot be loaded or parsed.
     pub fn render(&self) -> Result<RgbaImage> {
         render_screen(&self.screen, &self.config)
     }
 
+    /// Render and write to a file. The format is inferred from the extension
+    /// (`.png`, `.jpg`, `.jpeg`).
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         let image = DynamicImage::ImageRgba8(self.render()?);
@@ -65,6 +94,7 @@ impl Screenshot {
         Ok(())
     }
 
+    /// Render and encode as PNG bytes in memory, suitable for piping to stdout.
     pub fn to_png(&self) -> Result<Vec<u8>> {
         let image = self.render()?;
         let mut bytes = Vec::new();
@@ -80,6 +110,8 @@ impl Screenshot {
     }
 }
 
+/// Map a file extension to an image format. Only PNG and JPEG are supported because
+/// these are the formats commonly accepted by browsers and chat tools for inline display.
 fn output_format(path: &Path) -> Result<ImageFormat> {
     let ext = path
         .extension()
@@ -96,6 +128,10 @@ fn output_format(path: &Path) -> Result<ImageFormat> {
     }
 }
 
+/// Core rasterizer: allocates an image sized to the terminal grid, paints each cell's
+/// background, then draws the glyph on top. Character width is derived from the 'M'
+/// glyph advance of the loaded font so that the grid is monospaced regardless of which
+/// font the OS provides.
 fn render_screen(screen: &ScreenSnapshot, config: &ScreenshotConfig) -> Result<RgbaImage> {
     let source = SystemSource::new();
     let handle = match &config.font_name {

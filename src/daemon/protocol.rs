@@ -41,9 +41,11 @@ pub enum Request {
     Screenshot {
         name: String,
     },
+    /// Request the raw ANSI-formatted screen bytes for client-side image rendering.
     ScreenshotAnsi {
         name: String,
     },
+    /// Request pre-rendered ANSI row strings (one per visible row).
     ScreenshotCells {
         name: String,
     },
@@ -122,8 +124,12 @@ pub enum Response {
         #[serde(flatten)]
         pos: CursorPos,
     },
+    /// Raw ANSI screen bytes for client-side vt100 replay and image rendering.
+    ///
+    /// The payload is base64-encoded because the ANSI stream contains arbitrary bytes
+    /// (escape sequences, control characters) that are not valid UTF-8 and would break
+    /// JSON serialization.
     ScreenshotAnsi {
-        /// Base64-encoded ANSI-formatted screen content (raw bytes).
         content_b64: String,
         rows: u16,
         cols: u16,
