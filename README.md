@@ -24,6 +24,13 @@ From source:
 cargo install terminal-use
 ```
 
+Linux source builds that include image screenshots need development packages
+for `fontconfig` and `freetype` available to `pkg-config`. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev
+```
+
 To update:
 
 ```bash

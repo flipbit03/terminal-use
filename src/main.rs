@@ -114,7 +114,7 @@ enum Command {
         font: Option<String>,
 
         /// Font size in pixels.
-        #[arg(long, default_value = "14")]
+        #[arg(long, default_value = "14", value_parser = parse_font_size)]
         font_size: f32,
     },
 
@@ -251,6 +251,20 @@ fn parse_env(s: &str) -> Result<(String, String), String> {
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
+fn parse_font_size(s: &str) -> Result<f32, String> {
+    let size = s
+        .parse::<f32>()
+        .map_err(|_| format!("Invalid font size: {s:?}"))?;
+
+    if !size.is_finite() || size <= 0.0 {
+        return Err(format!(
+            "Invalid font size: {s:?}. Expected a finite number greater than 0"
+        ));
+    }
+
+    Ok(size)
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -353,6 +367,18 @@ mod tests {
     #[test]
     fn screenshot_rejects_output_with_stdout() {
         let result = Cli::try_parse_from(["tu", "screenshot", "--stdout", "out.png"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn screenshot_rejects_zero_font_size() {
+        let result = Cli::try_parse_from(["tu", "screenshot", "--stdout", "--font-size", "0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn screenshot_rejects_negative_font_size() {
+        let result = Cli::try_parse_from(["tu", "screenshot", "--stdout", "--font-size", "-1"]);
         assert!(result.is_err());
     }
 }

@@ -20,6 +20,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Linux font dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev
+
       - name: Cache cargo registry & build
         uses: actions/cache@v4
         with:
@@ -51,6 +54,9 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux font dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
@@ -92,6 +98,10 @@ jobs:
       - name: Install musl-tools (Linux only)
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Linux font dependencies
+        if: contains(matrix.target, 'linux')
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4

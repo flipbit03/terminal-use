@@ -133,6 +133,15 @@ fn output_format(path: &Path) -> Result<ImageFormat> {
 /// glyph advance of the loaded font so that the grid is monospaced regardless of which
 /// font the OS provides.
 fn render_screen(screen: &ScreenSnapshot, config: &ScreenshotConfig) -> Result<RgbaImage> {
+    if !config.font_size.is_finite() || config.font_size <= 0.0 {
+        return Err(anyhow!("font size must be a finite number greater than 0"));
+    }
+    if !config.line_height.is_finite() || config.line_height <= 0.0 {
+        return Err(anyhow!(
+            "line height must be a finite number greater than 0"
+        ));
+    }
+
     let source = SystemSource::new();
     let handle = match &config.font_name {
         Some(name) => source
@@ -169,15 +178,28 @@ fn render_screen(screen: &ScreenSnapshot, config: &ScreenshotConfig) -> Result<R
 
         for (col_idx, cell) in row.iter().enumerate() {
             let x = col_idx as f32 * char_width;
-            let (fg, bg) = if cell.attrs.inverse {
-                (color_to_rgba(cell.bg, false), color_to_rgba(cell.fg, true))
+            let bg = if cell.attrs.inverse {
+                color_to_rgba(cell.fg, true)
             } else {
-                (color_to_rgba(cell.fg, true), color_to_rgba(cell.bg, false))
+                color_to_rgba(cell.bg, false)
             };
 
             let rect = Rect::at(x.round() as i32, y.round() as i32)
                 .of_size(char_width.ceil() as u32, line_height.ceil() as u32);
             draw_filled_rect_mut(&mut image, rect, bg);
+        }
+    }
+
+    for (row_idx, row) in screen.cells().iter().enumerate() {
+        let y = row_idx as f32 * line_height;
+
+        for (col_idx, cell) in row.iter().enumerate() {
+            let x = col_idx as f32 * char_width;
+            let fg = if cell.attrs.inverse {
+                color_to_rgba(cell.bg, false)
+            } else {
+                color_to_rgba(cell.fg, true)
+            };
 
             if cell.is_wide_continuation || cell.contents.is_empty() || cell.contents == " " {
                 continue;
@@ -228,5 +250,14 @@ mod tests {
 
         let _ = std::fs::remove_file(png);
         let _ = std::fs::remove_file(jpg);
+    }
+
+    #[test]
+    fn rejects_invalid_font_size() {
+        let mut parser = vt100::Parser::new(2, 4, 0);
+        parser.process(b"hi");
+        let screenshot =
+            Screenshot::new(ScreenSnapshot::from_vt100(parser.screen())).font_size(0.0);
+        assert!(screenshot.render().is_err());
     }
 }

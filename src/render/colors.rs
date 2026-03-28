@@ -11,7 +11,7 @@ use crate::render::screen::Color;
 /// Convert a terminal [`Color`] to an `image::Rgba` pixel value.
 ///
 /// `is_foreground` controls the fallback for [`Color::Default`]: white for foreground
-/// text, black for background. This matches the standard dark-on-light terminal
+/// text, black for background. This matches the standard light-on-dark terminal
 /// convention (white text on a black background).
 pub fn color_to_rgba(color: Color, is_foreground: bool) -> Rgba<u8> {
     match color {
