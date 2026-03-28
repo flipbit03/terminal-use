@@ -18,8 +18,7 @@ anyhow = "1"
 ab_glyph = "0.2"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
-font-kit = "0.14"
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png"] }
 imageproc = "0.25"
 nix = { version = "0.31", features = ["term", "signal", "process", "ioctl", "fs", "user", "poll"] }
 vt100 = "0.15"

@@ -1,5 +1,5 @@
-/// Format a plain text snapshot for human display.
-pub fn format_snapshot(
+/// Format a plain text screenshot for human display.
+pub fn format_screenshot(
     content: &str,
     _rows: u16,
     _cols: u16,
@@ -9,8 +9,8 @@ pub fn format_snapshot(
     content.to_string()
 }
 
-/// Format a text snapshot as JSON.
-pub fn format_snapshot_json(
+/// Format a screenshot as JSON.
+pub fn format_screenshot_json(
     content: &str,
     rows: u16,
     cols: u16,
@@ -18,7 +18,7 @@ pub fn format_snapshot_json(
     cursor_col: u16,
 ) -> serde_json::Value {
     serde_json::json!({
-        "type": "snapshot",
+        "type": "screenshot",
         "format": "text",
         "content": content,
         "rows": rows,

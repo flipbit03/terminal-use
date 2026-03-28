@@ -88,32 +88,29 @@ enum Command {
         name: String,
     },
 
-    /// Capture the terminal screen as text.
-    Snapshot {
-        /// Session name.
-        #[arg(long, default_value = "default")]
-        name: String,
-    },
-
-    /// Capture the current terminal rendering as an image.
+    /// Capture the terminal screen (text by default, --png for image).
     Screenshot {
         /// Session name.
         #[arg(long, default_value = "default")]
         name: String,
 
-        /// Output file path. Required unless --stdout is set.
-        #[arg(required_unless_present = "stdout")]
+        /// Render as a PNG image instead of text.
+        #[arg(long)]
+        png: bool,
+
+        /// Output file path (used with --png).
+        #[arg(long, short)]
         output: Option<PathBuf>,
 
-        /// Write PNG bytes to stdout instead of a file.
-        #[arg(long, conflicts_with = "output")]
+        /// Write PNG bytes to stdout instead of a file (used with --png).
+        #[arg(long)]
         stdout: bool,
 
-        /// Font family for rendering.
+        /// Path to a TTF font file for rendering (used with --png).
         #[arg(long)]
         font: Option<String>,
 
-        /// Font size in pixels.
+        /// Font size in pixels (used with --png).
         #[arg(long, default_value = "14", value_parser = parse_font_size)]
         font_size: f32,
     },
@@ -309,15 +306,20 @@ async fn main() {
 
         Command::Status { name } => commands::status::run(name, format).await,
 
-        Command::Snapshot { name } => commands::snapshot::run(name, format).await,
-
         Command::Screenshot {
             name,
+            png,
             output,
             stdout,
             font,
             font_size,
-        } => commands::screenshot::run(name, output, stdout, font, font_size, cli.json).await,
+        } => {
+            if png {
+                commands::screenshot::run_png(name, output, stdout, font, font_size).await
+            } else {
+                commands::screenshot::run_text(name, format).await
+            }
+        }
 
         Command::Cursor { name } => commands::cursor::run(name, format).await,
 
@@ -353,32 +355,34 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn screenshot_requires_output_without_stdout() {
+    fn screenshot_text_mode_no_args() {
         let result = Cli::try_parse_from(["tu", "screenshot"]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn screenshot_accepts_stdout_without_output() {
-        let result = Cli::try_parse_from(["tu", "screenshot", "--stdout"]);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn screenshot_rejects_output_with_stdout() {
-        let result = Cli::try_parse_from(["tu", "screenshot", "--stdout", "out.png"]);
-        assert!(result.is_err());
+    fn screenshot_png_stdout() {
+        let result = Cli::try_parse_from(["tu", "screenshot", "--png", "--stdout"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn screenshot_png_output() {
+        let result = Cli::try_parse_from(["tu", "screenshot", "--png", "--output", "shot.png"]);
+        assert!(result.is_ok());
     }
 
     #[test]
     fn screenshot_rejects_zero_font_size() {
-        let result = Cli::try_parse_from(["tu", "screenshot", "--stdout", "--font-size", "0"]);
+        let result =
+            Cli::try_parse_from(["tu", "screenshot", "--png", "--stdout", "--font-size", "0"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn screenshot_rejects_negative_font_size() {
-        let result = Cli::try_parse_from(["tu", "screenshot", "--stdout", "--font-size", "-1"]);
+        let result =
+            Cli::try_parse_from(["tu", "screenshot", "--png", "--stdout", "--font-size", "-1"]);
         assert!(result.is_err());
     }
 }

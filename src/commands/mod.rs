@@ -10,7 +10,6 @@ pub mod run;
 pub mod screenshot;
 pub mod scrollback;
 pub mod self_cmd;
-pub mod snapshot;
 pub mod status;
 pub mod type_text;
 pub mod usage;

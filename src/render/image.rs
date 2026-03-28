@@ -1,26 +1,25 @@
 //! Rasterized terminal screenshot renderer.
 //!
 //! Converts a [`ScreenSnapshot`] into a pixel image by drawing each cell's background
-//! rectangle and glyph using a system monospace font. The output is a standard RGBA image
-//! that can be saved as PNG or JPEG.
+//! rectangle and glyph using an embedded monospace font (JetBrains Mono). The output
+//! is a standard RGBA image that can be saved as PNG.
 //!
-//! Font discovery happens via `font-kit`'s [`SystemSource`], which queries the OS font
-//! registry for a monospace family (or a user-specified family). The font is loaded fresh
-//! on every render call — there is no cross-invocation cache, which is acceptable for a
-//! short-lived CLI process but would need revisiting for batch use.
+//! A user-specified TTF file can override the embedded font via [`Screenshot::font_path`].
 
 use std::path::Path;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use anyhow::{anyhow, Context, Result};
-use font_kit::{family_name::FamilyName, handle::Handle, source::SystemSource};
 use image::ImageEncoder;
-use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba, RgbaImage};
+use image::{ImageBuffer, Rgba, RgbaImage};
 use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
 
 use crate::render::colors::color_to_rgba;
 use crate::render::screen::ScreenSnapshot;
+
+/// JetBrains Mono Regular, embedded at compile time (OFL-licensed).
+static EMBEDDED_FONT: &[u8] = include_bytes!("fonts/JetBrainsMono-Regular.ttf");
 
 /// Rendering parameters for a terminal screenshot.
 ///
@@ -28,7 +27,7 @@ use crate::render::screen::ScreenSnapshot;
 /// (1.2 = 120% line spacing).
 #[derive(Debug, Clone)]
 pub struct ScreenshotConfig {
-    pub font_name: Option<String>,
+    pub font_path: Option<String>,
     pub font_size: f32,
     pub line_height: f32,
 }
@@ -36,7 +35,7 @@ pub struct ScreenshotConfig {
 impl Default for ScreenshotConfig {
     fn default() -> Self {
         Self {
-            font_name: None,
+            font_path: None,
             font_size: 14.0,
             line_height: 1.2,
         }
@@ -61,9 +60,10 @@ impl Screenshot {
         }
     }
 
-    /// Override the font family. If not called, the system's default monospace font is used.
-    pub fn font_name(mut self, name: &str) -> Self {
-        self.config.font_name = Some(name.to_string());
+    /// Override the font with a TTF file path. If not called, the embedded
+    /// JetBrains Mono font is used.
+    pub fn font_path(mut self, path: &str) -> Self {
+        self.config.font_path = Some(path.to_string());
         self
     }
 
@@ -77,19 +77,27 @@ impl Screenshot {
     ///
     /// # Errors
     ///
-    /// Returns an error if the system font cannot be loaded or parsed.
+    /// Returns an error if the font cannot be loaded or parsed.
     pub fn render(&self) -> Result<RgbaImage> {
         render_screen(&self.screen, &self.config)
     }
 
-    /// Render and write to a file. The format is inferred from the extension
-    /// (`.png`, `.jpg`, `.jpeg`).
+    /// Render and write to a PNG file.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        let image = DynamicImage::ImageRgba8(self.render()?);
-        let format = output_format(path)?;
-        image
-            .save_with_format(path, format)
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase());
+        if ext.as_deref() != Some("png") {
+            return Err(anyhow!(
+                "screenshot output must be a .png file, got: {}",
+                path.display()
+            ));
+        }
+        let image = self.render()?;
+        let bytes = encode_png(&image)?;
+        std::fs::write(path, bytes)
             .with_context(|| format!("save screenshot to {}", path.display()))?;
         Ok(())
     }
@@ -97,41 +105,27 @@ impl Screenshot {
     /// Render and encode as PNG bytes in memory, suitable for piping to stdout.
     pub fn to_png(&self) -> Result<Vec<u8>> {
         let image = self.render()?;
-        let mut bytes = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut bytes)
-            .write_image(
-                image.as_raw(),
-                image.width(),
-                image.height(),
-                image::ColorType::Rgba8.into(),
-            )
-            .context("encode PNG screenshot")?;
-        Ok(bytes)
+        encode_png(&image)
     }
 }
 
-/// Map a file extension to an image format. Only PNG and JPEG are supported because
-/// these are the formats commonly accepted by browsers and chat tools for inline display.
-fn output_format(path: &Path) -> Result<ImageFormat> {
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .ok_or_else(|| anyhow!("screenshot output path must include .png, .jpg, or .jpeg"))?;
-
-    match ext.as_str() {
-        "png" => Ok(ImageFormat::Png),
-        "jpg" | "jpeg" => Ok(ImageFormat::Jpeg),
-        _ => Err(anyhow!(
-            "unsupported screenshot output extension .{ext}; use .png, .jpg, or .jpeg"
-        )),
-    }
+fn encode_png(image: &RgbaImage) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ColorType::Rgba8.into(),
+        )
+        .context("encode PNG screenshot")?;
+    Ok(bytes)
 }
 
 /// Core rasterizer: allocates an image sized to the terminal grid, paints each cell's
 /// background, then draws the glyph on top. Character width is derived from the 'M'
 /// glyph advance of the loaded font so that the grid is monospaced regardless of which
-/// font the OS provides.
+/// font is used.
 fn render_screen(screen: &ScreenSnapshot, config: &ScreenshotConfig) -> Result<RgbaImage> {
     if !config.font_size.is_finite() || config.font_size <= 0.0 {
         return Err(anyhow!("font size must be a finite number greater than 0"));
@@ -142,21 +136,12 @@ fn render_screen(screen: &ScreenSnapshot, config: &ScreenshotConfig) -> Result<R
         ));
     }
 
-    let source = SystemSource::new();
-    let handle = match &config.font_name {
-        Some(name) => source
-            .select_best_match(&[FamilyName::Title(name.clone())], &Default::default())
-            .map_err(|err| anyhow!("load font {name:?}: {err}"))?,
-        None => source
-            .select_best_match(&[FamilyName::Monospace], &Default::default())
-            .map_err(|err| anyhow!("load system monospace font: {err}"))?,
-    };
-
-    let font_data = match handle {
-        Handle::Path { path, .. } => {
-            std::fs::read(&path).with_context(|| format!("read font {}", path.display()))?
+    let font_data: std::borrow::Cow<'_, [u8]> = match &config.font_path {
+        Some(path) => {
+            let bytes = std::fs::read(path).with_context(|| format!("read font file {path:?}"))?;
+            std::borrow::Cow::Owned(bytes)
         }
-        Handle::Memory { bytes, .. } => bytes.to_vec(),
+        None => std::borrow::Cow::Borrowed(EMBEDDED_FONT),
     };
 
     let font =
@@ -228,7 +213,7 @@ mod tests {
     use crate::render::screen::ScreenSnapshot;
 
     #[test]
-    fn saves_png_and_jpeg() {
+    fn saves_png() {
         let mut parser = vt100::Parser::new(4, 20, 0);
         parser.process(b"\x1b[32mhello\x1b[0m");
         let screenshot = Screenshot::new(ScreenSnapshot::from_vt100(parser.screen()));
@@ -241,15 +226,12 @@ mod tests {
                 .as_nanos()
         ));
         let png = base.with_extension("png");
-        let jpg = base.with_extension("jpg");
-        let bad = base.with_extension("gif");
+        let gif = base.with_extension("gif");
 
         screenshot.save(&png).unwrap();
-        screenshot.save(&jpg).unwrap();
-        assert!(screenshot.save(&bad).is_err());
+        assert!(screenshot.save(&gif).is_err());
 
         let _ = std::fs::remove_file(png);
-        let _ = std::fs::remove_file(jpg);
     }
 
     #[test]

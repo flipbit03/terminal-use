@@ -24,13 +24,6 @@ From source:
 cargo install terminal-use
 ```
 
-Linux source builds that include image screenshots need development packages
-for `fontconfig` and `freetype` available to `pkg-config`. On Debian/Ubuntu:
-
-```bash
-sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev
-```
-
 To update:
 
 ```bash
@@ -44,8 +37,7 @@ tu self update
 
 Some programs (htop, vim, mc, dialog-based installers, ncurses UIs) need a real
 terminal to render their interface — you can't just pipe stdin/stdout. Use `tu`
-to run them in a virtual terminal, snapshot the screen as text, capture a real
-screenshot when needed, and send keystrokes.
+to run them in a virtual terminal, screenshot the screen and send keystrokes.
 Run `tu usage` before the first interaction for the full command reference.
 ```
 
@@ -70,16 +62,15 @@ tu monitor --name nethack         # Watch a specific session
 Read the current screen as text:
 
 ```bash
-tu snapshot
-tu snapshot --json
+tu screenshot
+tu screenshot --json
 ```
 
-Capture the current rendering as an image:
+Capture the current rendering as a PNG image:
 
 ```bash
-tu screenshot current.png
-tu screenshot current.jpg
-tu screenshot --stdout > current.png
+tu screenshot --png --output current.png
+tu screenshot --png --stdout > current.png
 ```
 
 ## How it works

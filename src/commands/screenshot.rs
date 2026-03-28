@@ -6,19 +6,51 @@ use base64::Engine;
 
 use crate::daemon::protocol::{Request, Response};
 use crate::daemon::server::{ensure_daemon, send_request};
+use crate::output::Format;
 use crate::render::image::Screenshot;
 use crate::render::screen::ScreenSnapshot;
+use crate::render::text;
 
-pub async fn run(
+pub async fn run_text(name: String, format: Format) -> Result<()> {
+    ensure_daemon()?;
+
+    match send_request(&Request::Screenshot { name }).await? {
+        Response::Screenshot {
+            content,
+            rows,
+            cols,
+            cursor,
+        } => {
+            match format {
+                Format::Human => {
+                    println!(
+                        "{}",
+                        text::format_screenshot(&content, rows, cols, cursor.row, cursor.col)
+                    );
+                }
+                Format::Json => {
+                    println!(
+                        "{}",
+                        text::format_screenshot_json(&content, rows, cols, cursor.row, cursor.col)
+                    );
+                }
+            }
+            Ok(())
+        }
+        Response::Error { message } => anyhow::bail!("{message}"),
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
+}
+
+pub async fn run_png(
     name: String,
     output: Option<PathBuf>,
     stdout: bool,
     font: Option<String>,
     font_size: f32,
-    explicit_json: bool,
 ) -> Result<()> {
-    if explicit_json {
-        anyhow::bail!("--json is not supported for image screenshots");
+    if !stdout && output.is_none() {
+        anyhow::bail!("--png requires either --output <file> or --stdout");
     }
 
     ensure_daemon()?;
@@ -50,7 +82,7 @@ pub async fn run(
         return Ok(());
     }
 
-    let path = output.context("output path is required unless --stdout is used")?;
+    let path = output.unwrap();
     screenshot.save(&path)?;
     Ok(())
 }
@@ -67,8 +99,8 @@ fn build_screenshot(
 
     let screen = ScreenSnapshot::from_vt100(parser.screen());
     let mut screenshot = Screenshot::new(screen).font_size(font_size);
-    if let Some(font_name) = font {
-        screenshot = screenshot.font_name(&font_name);
+    if let Some(font_path) = font {
+        screenshot = screenshot.font_path(&font_path);
     }
 
     Ok(screenshot)
