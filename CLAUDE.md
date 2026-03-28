@@ -25,7 +25,7 @@ CLI client → Unix socket (JSON-over-newline) → background daemon → per-ses
 - `src/pty/` — PTY spawn, input injection, resize
 - `src/keys.rs` — key name → escape sequence mapping
 - `src/commands/` — CLI command handlers (each talks to daemon)
-- `src/render/` — screenshot output formatters
+- `src/render/` — text snapshot and image screenshot renderers
 
 ## Conventions
 

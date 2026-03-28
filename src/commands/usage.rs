@@ -19,7 +19,11 @@ COMMANDS:
   list                            List active sessions
   status [--name <s>]             Session info: pid, alive/exited, exit code, size
 
-  screenshot [--name <s>]         Plain text screen dump
+  snapshot [--name <s>]           Plain text screen dump
+  screenshot [--name <s>] <file>  Render current screen to .png/.jpg
+    --stdout                        Write PNG bytes to stdout instead of a file
+    --font <name>                   Font family for rendering
+    --font-size <px>                Font size in pixels (default: 14)
   cursor [--name <s>]             Print cursor position as row,col
   scrollback [--name <s>]         Print scrollback buffer
     --lines <n>                     How many lines (default: all)
@@ -53,7 +57,9 @@ OUTPUT:
 
 EXAMPLES:
   tu run htop                          Start htop
-  tu screenshot                        Read the screen
+  tu snapshot                          Read the screen as text
+  tu screenshot shot.png               Save a rendered screenshot
+  tu screenshot --stdout > shot.png    Stream a PNG screenshot
   tu press F2                          Open htop setup
   tu press Escape : w q Enter          Save and quit vim
   tu type "hello world"                Type text into the terminal

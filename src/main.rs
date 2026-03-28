@@ -6,6 +6,8 @@ mod pty;
 mod render;
 mod version_check;
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 use daemon::protocol::TermSize;
@@ -86,12 +88,34 @@ enum Command {
         name: String,
     },
 
-    /// Capture the terminal screen.
+    /// Capture the terminal screen as text.
+    Snapshot {
+        /// Session name.
+        #[arg(long, default_value = "default")]
+        name: String,
+    },
+
+    /// Capture the current terminal rendering as an image.
     Screenshot {
         /// Session name.
         #[arg(long, default_value = "default")]
         name: String,
-        // TODO Phase 2: --png, --ansi, --html, --out
+
+        /// Output file path. Required unless --stdout is set.
+        #[arg(required_unless_present = "stdout")]
+        output: Option<PathBuf>,
+
+        /// Write PNG bytes to stdout instead of a file.
+        #[arg(long, conflicts_with = "output")]
+        stdout: bool,
+
+        /// Font family for rendering.
+        #[arg(long)]
+        font: Option<String>,
+
+        /// Font size in pixels.
+        #[arg(long, default_value = "14")]
+        font_size: f32,
     },
 
     /// Print cursor position as row,col.
@@ -271,7 +295,15 @@ async fn main() {
 
         Command::Status { name } => commands::status::run(name, format).await,
 
-        Command::Screenshot { name } => commands::screenshot::run(name, format).await,
+        Command::Snapshot { name } => commands::snapshot::run(name, format).await,
+
+        Command::Screenshot {
+            name,
+            output,
+            stdout,
+            font,
+            font_size,
+        } => commands::screenshot::run(name, output, stdout, font, font_size, cli.json).await,
 
         Command::Cursor { name } => commands::cursor::run(name, format).await,
 
@@ -298,5 +330,29 @@ async fn main() {
     if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn screenshot_requires_output_without_stdout() {
+        let result = Cli::try_parse_from(["tu", "screenshot"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn screenshot_accepts_stdout_without_output() {
+        let result = Cli::try_parse_from(["tu", "screenshot", "--stdout"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn screenshot_rejects_output_with_stdout() {
+        let result = Cli::try_parse_from(["tu", "screenshot", "--stdout", "out.png"]);
+        assert!(result.is_err());
     }
 }
