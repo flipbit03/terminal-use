@@ -2,9 +2,12 @@ mod commands;
 mod daemon;
 mod keys;
 mod output;
+mod paths;
 mod pty;
 mod render;
 mod version_check;
+
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
@@ -86,12 +89,31 @@ enum Command {
         name: String,
     },
 
-    /// Capture the terminal screen.
+    /// Capture the terminal screen (text by default, --png for image).
     Screenshot {
         /// Session name.
         #[arg(long, default_value = "default")]
         name: String,
-        // TODO Phase 2: --png, --ansi, --html, --out
+
+        /// Render as a PNG image instead of text.
+        #[arg(long)]
+        png: bool,
+
+        /// Output file path (used with --png).
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+
+        /// Write PNG bytes to stdout instead of a file (used with --png).
+        #[arg(long)]
+        stdout: bool,
+
+        /// Path to a TTF font file for rendering (used with --png).
+        #[arg(long)]
+        font: Option<String>,
+
+        /// Font size in pixels (used with --png).
+        #[arg(long, default_value = "14", value_parser = parse_font_size)]
+        font_size: f32,
     },
 
     /// Print cursor position as row,col.
@@ -227,6 +249,20 @@ fn parse_env(s: &str) -> Result<(String, String), String> {
     Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
+fn parse_font_size(s: &str) -> Result<f32, String> {
+    let size = s
+        .parse::<f32>()
+        .map_err(|_| format!("Invalid font size: {s:?}"))?;
+
+    if !size.is_finite() || size <= 0.0 {
+        return Err(format!(
+            "Invalid font size: {s:?}. Expected a finite number greater than 0"
+        ));
+    }
+
+    Ok(size)
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -271,7 +307,20 @@ async fn main() {
 
         Command::Status { name } => commands::status::run(name, format).await,
 
-        Command::Screenshot { name } => commands::screenshot::run(name, format).await,
+        Command::Screenshot {
+            name,
+            png,
+            output,
+            stdout,
+            font,
+            font_size,
+        } => {
+            if png {
+                commands::screenshot::run_png(name, output, stdout, font, font_size).await
+            } else {
+                commands::screenshot::run_text(name, format).await
+            }
+        }
 
         Command::Cursor { name } => commands::cursor::run(name, format).await,
 
@@ -298,5 +347,43 @@ async fn main() {
     if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn screenshot_text_mode_no_args() {
+        let result = Cli::try_parse_from(["tu", "screenshot"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn screenshot_png_stdout() {
+        let result = Cli::try_parse_from(["tu", "screenshot", "--png", "--stdout"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn screenshot_png_output() {
+        let result = Cli::try_parse_from(["tu", "screenshot", "--png", "--output", "shot.png"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn screenshot_rejects_zero_font_size() {
+        let result =
+            Cli::try_parse_from(["tu", "screenshot", "--png", "--stdout", "--font-size", "0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn screenshot_rejects_negative_font_size() {
+        let result =
+            Cli::try_parse_from(["tu", "screenshot", "--png", "--stdout", "--font-size", "-1"]);
+        assert!(result.is_err());
     }
 }
