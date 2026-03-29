@@ -2,6 +2,7 @@ mod commands;
 mod daemon;
 mod keys;
 mod output;
+mod paths;
 mod pty;
 mod render;
 mod version_check;

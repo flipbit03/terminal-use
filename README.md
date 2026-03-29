@@ -57,22 +57,6 @@ tu monitor --name nethack         # Watch a specific session
 - Handles terminal resize
 - Ctrl+C to detach
 
-## Capture Output
-
-Read the current screen as text:
-
-```bash
-tu screenshot
-tu screenshot --json
-```
-
-Capture the current rendering as a PNG image:
-
-```bash
-tu screenshot --png --output current.png
-tu screenshot --png --stdout > current.png
-```
-
 ## How it works
 
 `tu` wraps a headless PTY + [vt100](https://crates.io/crates/vt100) terminal emulator behind a CLI. A background daemon manages sessions — each CLI invocation is stateless.

@@ -23,7 +23,7 @@ COMMANDS:
     --png                           Render as a PNG image instead of text
     --output <file>                 Output file path (default: auto temp file)
     --stdout                        Write PNG bytes to stdout (with --png)
-    --font <path>                   Path to a TTF font file (with --png)
+    --font <path>                   Optional TTF font file (bundled: JetBrains Mono)
     --font-size <px>                Font size in pixels (default: 14, with --png)
   cursor [--name <s>]             Print cursor position as row,col
   scrollback [--name <s>]         Print scrollback buffer
