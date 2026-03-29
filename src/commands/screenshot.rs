@@ -42,6 +42,68 @@ pub async fn run_text(name: String, format: Format) -> Result<()> {
     }
 }
 
+fn auto_png_path(session_name: &str) -> PathBuf {
+    use std::time::SystemTime;
+
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let secs = now.as_secs();
+    let tenths = (now.subsec_millis() / 100) as u64;
+
+    // Convert to broken-down time manually (UTC) to avoid adding chrono dep.
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Days since 1970-01-01 → year/month/day.
+    let (year, month, day) = {
+        let mut y = 1970i64;
+        let mut remaining = days as i64;
+        loop {
+            let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                366
+            } else {
+                365
+            };
+            if remaining < days_in_year {
+                break;
+            }
+            remaining -= days_in_year;
+            y += 1;
+        }
+        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+        let month_days = [
+            31,
+            if leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let mut m = 0usize;
+        while m < 12 && remaining >= month_days[m] {
+            remaining -= month_days[m];
+            m += 1;
+        }
+        (y, m + 1, remaining + 1)
+    };
+
+    let filename = format!(
+        "tu-screenshot-{}-{:04}{:02}{:02}T{:02}{:02}{:02}.{}.png",
+        session_name, year, month, day, hours, minutes, seconds, tenths
+    );
+    std::env::temp_dir().join(filename)
+}
+
 pub async fn run_png(
     name: String,
     output: Option<PathBuf>,
@@ -49,13 +111,9 @@ pub async fn run_png(
     font: Option<String>,
     font_size: f32,
 ) -> Result<()> {
-    if !stdout && output.is_none() {
-        anyhow::bail!("--png requires either --output <file> or --stdout");
-    }
-
     ensure_daemon()?;
 
-    let response = send_request(&Request::ScreenshotAnsi { name }).await?;
+    let response = send_request(&Request::ScreenshotAnsi { name: name.clone() }).await?;
     let (ansi_bytes, rows, cols) = match response {
         Response::ScreenshotAnsi {
             content_b64,
@@ -82,8 +140,9 @@ pub async fn run_png(
         return Ok(());
     }
 
-    let path = output.unwrap();
+    let path = output.unwrap_or_else(|| auto_png_path(&name));
     screenshot.save(&path)?;
+    println!("{}", path.display());
     Ok(())
 }
 
