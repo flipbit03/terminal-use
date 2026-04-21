@@ -72,10 +72,16 @@ pub fn spawn(
                 let _ = close(slave_raw);
             }
 
-            // Set environment
+            // Set environment. Do NOT set COLUMNS/LINES: they're only ever
+            // correct at spawn-time and never update on resize. Libraries like
+            // Python's shutil.get_terminal_size() read these env vars first and
+            // fall back to TIOCGWINSZ only if unset, so leaving stale values
+            // here causes those libraries (and anything that uses them, e.g.
+            // Textual) to report the wrong size forever. TIOCGWINSZ is
+            // authoritative and always current.
             std::env::set_var("TERM", term);
-            std::env::set_var("COLUMNS", size.cols.to_string());
-            std::env::set_var("LINES", size.rows.to_string());
+            std::env::remove_var("COLUMNS");
+            std::env::remove_var("LINES");
             for (key, value) in env {
                 std::env::set_var(key, value);
             }
