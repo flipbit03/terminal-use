@@ -113,12 +113,10 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
         // Check keys every 100ms (responsive input)
         match tty.read_key(Duration::from_millis(100))? {
             Some(Key::Quit) => break,
-            Some(Key::Left) => {
-                if *current_idx > 0 {
-                    *current_idx -= 1;
-                    last_rows = None;
-                    last_fetch = std::time::Instant::now() - fetch_interval; // force refetch
-                }
+            Some(Key::Left) if *current_idx > 0 => {
+                *current_idx -= 1;
+                last_rows = None;
+                last_fetch = std::time::Instant::now() - fetch_interval; // force refetch
             }
             Some(Key::Right) => {
                 let sessions = get_session_names().await.unwrap_or_default();
@@ -128,7 +126,7 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                     last_fetch = std::time::Instant::now() - fetch_interval;
                 }
             }
-            None => {}
+            Some(Key::Left) | None => {}
         }
     }
 
