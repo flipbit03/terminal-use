@@ -390,8 +390,15 @@ fn emit_frame_diff(prev: Option<&[String]>, new: &[String], session_name: &str) 
     // Begin synchronized output. No-op on terminals that don't recognize 2026.
     write!(out, "\x1b[?2026h")?;
 
-    // Refresh the OSC title (cheap, terminals dedupe internally).
-    write!(out, "\x1b]0;tu monitor: {session_name}\x07")?;
+    // First emission after a transition (startup, session switch, error,
+    // resize) — wipe the alt screen so we know we're rendering on top of a
+    // clean slate. Without this, leftovers from the waiting screen, a previous
+    // session's frame, or partial mid-render artifacts can survive on rows
+    // the diff later considers "unchanged" and never re-emits.
+    if prev.is_none() {
+        write!(out, "\x1b[2J\x1b[H")?;
+        write!(out, "\x1b]0;tu monitor: {session_name}\x07")?;
+    }
 
     let prev_len = prev.map(|p| p.len()).unwrap_or(0);
     for (i, line) in new.iter().enumerate() {
@@ -468,8 +475,15 @@ impl RawTerminal {
 
         termios::tcsetattr(io::stdin(), termios::SetArg::TCSANOW, &raw).context("tcsetattr raw")?;
 
-        // Enter alternate screen + hide cursor
-        print!("\x1b[?1049h\x1b[?25l");
+        // Enter alternate screen + hide cursor + disable autowrap.
+        //
+        // Autowrap-off (DECRST 7) matters with the diff-based emit path: if a
+        // session is wider than the user's terminal, raw cell content would
+        // overflow into the row below, and the diff would never re-clear that
+        // row when its model contents stayed "the same". With autowrap off
+        // the overflow is silently dropped and rows stay confined to their
+        // own line.
+        print!("\x1b[?1049h\x1b[?25l\x1b[?7l");
         io::stdout().flush()?;
 
         Ok(Self {
@@ -522,8 +536,8 @@ impl RawTerminal {
 
 impl Drop for RawTerminal {
     fn drop(&mut self) {
-        // Restore terminal: show cursor + leave alternate screen
-        print!("\x1b[?25h\x1b[?1049l");
+        // Restore terminal: re-enable autowrap, show cursor, leave alt screen.
+        print!("\x1b[?7h\x1b[?25h\x1b[?1049l");
         let _ = io::stdout().flush();
 
         // Restore original termios
