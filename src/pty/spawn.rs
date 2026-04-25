@@ -42,6 +42,20 @@ pub fn spawn(
         | termios::LocalFlags::ICANON
         | termios::LocalFlags::ISIG
         | termios::LocalFlags::IEXTEN;
+    // Disable ECHOCTL (control-character caret-notation echoing). With
+    // ECHOCTL on (macOS default for openpty), an input byte like 0x1B (ESC)
+    // is echoed back as the two printable characters `^[`. That's mostly
+    // harmless until an app like Midnight Commander writes its own ESC
+    // sequences to a child shell PTY: mc's "persistent command buffer"
+    // feature sends ESC `_` to trigger a zsh widget, then reads back the
+    // echo expecting it to come through as raw bytes for its
+    // `strip_ctrl_codes` filter. With ECHOCTL on, the echo is already
+    // caret-notation printable text — strip_ctrl_codes can't strip it,
+    // and the literal `^[_` gets baked into mc's prompt cache. Real
+    // terminals end up with ECHOCTL off by the time interactive shells
+    // run because the user's shell init (or zsh itself) disables it; we
+    // start from openpty's defaults, so we have to do it ourselves.
+    termios.local_flags &= !termios::LocalFlags::ECHOCTL;
     termios.input_flags |= termios::InputFlags::ICRNL;
     termios.output_flags |= termios::OutputFlags::OPOST | termios::OutputFlags::ONLCR;
     termios::tcsetattr(&slave, termios::SetArg::TCSANOW, &termios).context("tcsetattr failed")?;
