@@ -43,11 +43,10 @@ COMMANDS:
     --match-index N                 Disambiguate when multiple matches (0-based)
     --force                         Send even if app has not enabled mouse mode
   mouse down|up <col> <row>       Press / release one half of a click
-  mouse move <col> <row>          Move cursor (always glides; wire events
-                                  emitted only if app has AnyMotion / 1003)
-  mouse drag <c1> <r1> <c2> <r2>  Atomic down → motion path → up
+  mouse move <col> <row>          Move cursor to col,row
+  mouse drag <c1> <r1> <c2> <r2>  Drag from (c1,r1) to (c2,r2)
   mouse scroll up|down|left|right [<col> <row>] [--amount N]
-  mouse state [--name <s>]        Print mouse mode + encoding (or "disabled")
+  mouse state [--name <s>]        Print mouse status (or "disabled")
 
 MOUSE CURSOR DISPLAY:
   When tu has a synthetic mouse cursor it shows up as a magenta △ glyph
@@ -63,14 +62,8 @@ MOUSE TARGETING:
   and click the center cell of the chosen match.
   Combine with --clicks for one-shot multi-click on a label:
     tu mouse click --on-text "Buy upgrade" --clicks 2
-  Run `tu mouse state` first to confirm the inner app has DECSET 1000/1002/1006.
-  If mode=None the click errors out — pass --force to send raw bytes anyway.
-
-MOUSE GLIDE:
-  click / down / up / move always interpolate from the current synthetic
-  cursor to the target — the cursor never teleports. Motion-aware apps
-  (AnyMotion / 1003) see real motion events; weaker modes get nothing on
-  the wire but the synthetic cursor still glides for the monitor's △.
+  Run `tu mouse state` first to check the app accepts mouse input. If it
+  doesn't, the click errors out — pass --force to send the bytes anyway.
 
   resize <CxR> [--name <s>]      Resize terminal (e.g. 160x50)
   wait [--name <s>]               Wait for a condition
