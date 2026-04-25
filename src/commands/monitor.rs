@@ -56,6 +56,11 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
     // and compared row-by-row; only changed rows are written to stdout. This is
     // the bulk of the flicker fix — most rows stay byte-identical between frames.
     let mut prev_frame: Option<Vec<String>> = None;
+    // True the first time we observe a session after the waiting state. We
+    // give the inner app a brief moment to finish its initial paint before
+    // snapshotting — without this, a freshly-spawned mc/vim/htop is often
+    // mid-render on the first vt100 read and the user sees a partial frame.
+    let mut just_attached = true;
 
     let fetch_interval = Duration::from_millis(FRAME_INTERVAL_MS);
 
@@ -78,6 +83,7 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             if sessions.is_empty() {
                 draw_waiting_screen()?;
                 prev_frame = None;
+                just_attached = true;
                 match tty.read_key(Duration::from_millis(FRAME_INTERVAL_MS))? {
                     Some(Key::Quit) => break,
                     _ => continue,
@@ -85,6 +91,13 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             }
             if *current_idx >= sessions.len() {
                 *current_idx = sessions.len() - 1;
+            }
+
+            // Just emerged from the waiting state — let the inner app finish
+            // its initial paint before snapshotting.
+            if just_attached {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                just_attached = false;
             }
 
             let session_name = &sessions[*current_idx];
@@ -381,14 +394,15 @@ fn mouse_cursor_glyph(held: bool) -> &'static str {
 }
 
 /// Diff the new frame against the previously-emitted one and only re-emit rows
-/// that actually changed. Wraps the writes in DECSET 2026 (synchronized output
-/// mode) so terminals that support it commit the frame atomically — eliminates
-/// the partial-clear flicker on slow links like SSH.
+/// that actually changed.
+///
+/// (We avoid DECSET 2026 / synchronized output mode here: in practice it
+/// behaves inconsistently across the terminals we care about — at least one
+/// SSH terminal we tested ate frames mid-sync. The diff alone gives most of
+/// the flicker reduction; the per-row CSI 2K + write is small enough that
+/// terminals with their own paint coalescing handle it cleanly.)
 fn emit_frame_diff(prev: Option<&[String]>, new: &[String], session_name: &str) -> Result<()> {
     let mut out = io::stdout().lock();
-
-    // Begin synchronized output. No-op on terminals that don't recognize 2026.
-    write!(out, "\x1b[?2026h")?;
 
     // First emission after a transition (startup, session switch, error,
     // resize) — wipe the alt screen so we know we're rendering on top of a
@@ -419,8 +433,6 @@ fn emit_frame_diff(prev: Option<&[String]>, new: &[String], session_name: &str) 
         write!(out, "\x1b[{};1H\x1b[J", new.len() + 1)?;
     }
 
-    // End synchronized output and flush.
-    write!(out, "\x1b[?2026l")?;
     out.flush()?;
     Ok(())
 }
