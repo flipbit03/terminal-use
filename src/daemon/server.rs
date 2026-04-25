@@ -302,7 +302,7 @@ async fn screenshot_text_from_parser(
             if ch.is_empty() {
                 line.push(' ');
             } else {
-                line.push_str(&ch);
+                line.push_str(ch);
             }
         }
         let trimmed = line.trim_end();

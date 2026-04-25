@@ -163,7 +163,7 @@ impl Session {
                 if ch.is_empty() {
                     line.push(' ');
                 } else {
-                    push_sanitized(&mut line, &ch);
+                    push_sanitized(&mut line, ch);
                 }
             }
             let trimmed = line.trim_end();
@@ -246,7 +246,7 @@ impl Session {
                 if ch.is_empty() {
                     line.push(' ');
                 } else {
-                    push_sanitized(&mut line, &ch);
+                    push_sanitized(&mut line, ch);
                 }
             }
 
@@ -314,7 +314,7 @@ impl Session {
     pub async fn resize(&mut self, size: TermSize) -> Result<()> {
         pty::resize::resize_pty(&self.master_fd, &size)?;
         let mut parser = self.parser.lock().await;
-        parser.set_size(size.rows, size.cols);
+        parser.screen_mut().set_size(size.rows, size.cols);
         self.size = size.clone();
         self.mouse.clamp_to_size(&size);
         Ok(())

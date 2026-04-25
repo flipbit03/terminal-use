@@ -407,7 +407,7 @@ impl SessionManager {
                     if ch.is_empty() {
                         line.push(' ');
                     } else {
-                        line.push_str(&ch);
+                        line.push_str(ch);
                     }
                 }
                 text_rows.push(line);

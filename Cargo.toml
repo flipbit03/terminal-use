@@ -21,7 +21,7 @@ clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 imageproc = "0.25"
 nix = { version = "0.31", features = ["term", "signal", "process", "ioctl", "fs", "user", "poll"] }
-vt100 = "0.15"
+vt100 = "0.16"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

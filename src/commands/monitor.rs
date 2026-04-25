@@ -52,12 +52,15 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
     let mut last_fetch = std::time::Instant::now() - Duration::from_secs(10); // force immediate first fetch
     let mut last_change = std::time::Instant::now();
     // True when the next emission needs to wipe the alt screen first
-    // (startup, session switch, error, resize). Set on entry to those
-    // states; cleared after the next successful emit.
+    // (startup, session switch, error, resize). Cleared after the next
+    // successful emit.
     let mut needs_clear = true;
-    // Track the previous frame's row count so we can clear leftovers when
-    // the new frame is shorter (e.g. switching to a smaller session).
-    let mut prev_row_count: usize = 0;
+    // Previously-emitted frame, kept for row-by-row diff. Each frame is built
+    // into a fresh `Vec<String>` and compared to this one; rows whose string
+    // matches the prior frame's are skipped, leaving the terminal undisturbed.
+    // This is the bulk of the flicker fix — at 30fps with a mostly-static
+    // inner app, a typical tick writes the status line and nothing else.
+    let mut prev_frame: Option<Vec<String>> = None;
 
     let fetch_interval = Duration::from_millis(FRAME_INTERVAL_MS);
 
@@ -68,7 +71,7 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             last_term_size = term_size;
             last_rows = None;
             needs_clear = true;
-            prev_row_count = 0;
+            prev_frame = None;
             last_fetch = std::time::Instant::now() - fetch_interval; // force refetch
         }
 
@@ -80,7 +83,7 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             if sessions.is_empty() {
                 draw_waiting_screen()?;
                 needs_clear = true;
-                prev_row_count = 0;
+                prev_frame = None;
                 match tty.read_key(Duration::from_millis(FRAME_INTERVAL_MS))? {
                     Some(Key::Quit) => break,
                     _ => continue,
@@ -120,19 +123,19 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                         mouse_cursor,
                         mouse_held,
                     );
-                    emit_frame_full(
+                    emit_frame_diff(
                         needs_clear,
-                        prev_row_count,
+                        prev_frame.as_deref(),
                         &new_frame,
                         &sessions[*current_idx],
                     )?;
                     needs_clear = false;
-                    prev_row_count = new_frame.len();
+                    prev_frame = Some(new_frame);
                 }
                 Ok(Response::Error { message: _ }) => {
                     last_rows = None;
                     needs_clear = true;
-                    prev_row_count = 0;
+                    prev_frame = None;
                 }
                 _ => {}
             }
@@ -146,7 +149,7 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                 *current_idx -= 1;
                 last_rows = None;
                 needs_clear = true;
-                prev_row_count = 0;
+                prev_frame = None;
                 last_fetch = std::time::Instant::now() - fetch_interval; // force refetch
             }
             Some(Key::Right) => {
@@ -155,7 +158,7 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                     *current_idx += 1;
                     last_rows = None;
                     needs_clear = true;
-                    prev_row_count = 0;
+                    prev_frame = None;
                     last_fetch = std::time::Instant::now() - fetch_interval;
                 }
             }
@@ -392,19 +395,17 @@ fn mouse_cursor_glyph(held: bool) -> &'static str {
     }
 }
 
-/// Emit every row of the new frame. `needs_clear` triggers a full
-/// alt-screen wipe + OSC title before the rows go down — used on startup,
-/// session switches, errors, and terminal resizes.
+/// Emit only the rows that changed vs the previously-emitted frame.
 ///
-/// Why no diff? An earlier diff-based emitter cached a partial first frame
-/// (when the inner app was mid-paint) and subsequent ticks saw matching
-/// strings, so changed rows below the partial portion were never re-sent.
-/// The bandwidth saved was not worth the rendering bugs. Every frame now
-/// re-emits all rows; per-row `CSI 2K` keeps each line clean, and most
-/// terminals coalesce paint such that the user sees no flicker.
-fn emit_frame_full(
+/// `needs_clear` (set on startup / session switch / error / resize) wipes
+/// the alt screen first and forces a full redraw, regardless of `prev`.
+///
+/// Note: when no diff applies (every tick, the same status line, the same
+/// content rows), this writes nothing — the user's terminal is left alone.
+/// That's what kills the flicker compared to the full-repaint version.
+fn emit_frame_diff(
     needs_clear: bool,
-    prev_row_count: usize,
+    prev: Option<&[String]>,
     new: &[String],
     session_name: &str,
 ) -> Result<()> {
@@ -415,13 +416,29 @@ fn emit_frame_full(
         write!(out, "\x1b]0;tu monitor: {session_name}\x07")?;
     }
 
+    let prev_len = if needs_clear {
+        // After a wipe, every row in `new` differs from "the screen" (which
+        // is now empty). Treat prev as None for the diff loop.
+        0
+    } else {
+        prev.map(|p| p.len()).unwrap_or(0)
+    };
+
     for (i, line) in new.iter().enumerate() {
+        let unchanged = !needs_clear
+            && prev
+                .and_then(|p| p.get(i))
+                .map(|s| s == line)
+                .unwrap_or(false);
+        if unchanged {
+            continue;
+        }
         let row = i + 1;
         write!(out, "\x1b[{row};1H\x1b[2K{line}")?;
     }
 
-    // Clear leftovers if the previous frame was taller (e.g. resized smaller).
-    if new.len() < prev_row_count {
+    // If the new frame is shorter than the previous, clear what's beyond.
+    if new.len() < prev_len {
         write!(out, "\x1b[{};1H\x1b[J", new.len() + 1)?;
     }
 
