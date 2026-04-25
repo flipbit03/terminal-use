@@ -8,8 +8,47 @@ use nix::unistd::Pid;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
-use crate::daemon::protocol::{CursorPos, SessionInfo, TermSize};
+use crate::daemon::protocol::{CursorPos, MouseButton, MouseLastEvent, SessionInfo, TermSize};
 use crate::pty;
+
+/// Tu's idea of the synthetic mouse state for a session: where the cursor was
+/// left after the most recent emitted event, which buttons are still held
+/// (down without a matching up), and a snapshot of the most recent event.
+///
+/// The inner application is under no obligation to render the mouse cursor,
+/// so this is the only authoritative source for "where am I and what's held"
+/// when an agent loses track between calls.
+#[derive(Debug, Default)]
+pub struct MouseTracker {
+    pub cursor: Option<CursorPos>,
+    pub buttons_held: Vec<MouseButton>,
+    pub last_event: Option<MouseLastEvent>,
+}
+
+impl MouseTracker {
+    pub fn record_position(&mut self, col: u16, row: u16) {
+        self.cursor = Some(CursorPos { row, col });
+    }
+
+    pub fn press(&mut self, button: MouseButton) {
+        if !self.buttons_held.contains(&button) {
+            self.buttons_held.push(button);
+        }
+    }
+
+    pub fn release(&mut self, button: MouseButton) {
+        self.buttons_held.retain(|b| *b != button);
+    }
+
+    /// Clear the cursor if it is now outside the new size.
+    pub fn clamp_to_size(&mut self, size: &TermSize) {
+        if let Some(pos) = self.cursor {
+            if pos.col >= size.cols || pos.row >= size.rows {
+                self.cursor = None;
+            }
+        }
+    }
+}
 
 /// A terminal session: a child process in a PTY with a vt100 screen buffer.
 pub struct Session {
@@ -20,6 +59,7 @@ pub struct Session {
     pub size: TermSize,
     pub alive: bool,
     pub exit_code: Option<i32>,
+    pub mouse: MouseTracker,
 }
 
 impl Session {
@@ -47,6 +87,7 @@ impl Session {
             size,
             alive: true,
             exit_code: None,
+            mouse: MouseTracker::default(),
         })
     }
 
@@ -274,7 +315,8 @@ impl Session {
         pty::resize::resize_pty(&self.master_fd, &size)?;
         let mut parser = self.parser.lock().await;
         parser.set_size(size.rows, size.cols);
-        self.size = size;
+        self.size = size.clone();
+        self.mouse.clamp_to_size(&size);
         Ok(())
     }
 

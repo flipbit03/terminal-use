@@ -285,7 +285,14 @@ pub async fn run(cmd: MouseCmd, format: Format) -> Result<()> {
 
 async fn run_state(name: String, format: Format) -> Result<()> {
     match send_request(&Request::MouseState { name }).await? {
-        Response::MouseState { mode, encoding } => {
+        Response::MouseState {
+            mode,
+            encoding,
+            size,
+            cursor,
+            buttons_held,
+            last_event,
+        } => {
             use crate::daemon::protocol::MouseMode;
             match format {
                 Format::Human => {
@@ -294,12 +301,55 @@ async fn run_state(name: String, format: Format) -> Result<()> {
                     } else {
                         println!("mode={mode:?} encoding={encoding:?}");
                     }
+                    let cursor_str = match cursor {
+                        Some(p) => format!("({},{})", p.col, p.row),
+                        None => "none".into(),
+                    };
+                    println!("cursor={cursor_str} screensize={}x{}", size.cols, size.rows);
+                    let held_str = if buttons_held.is_empty() {
+                        "none".to_string()
+                    } else {
+                        buttons_held
+                            .iter()
+                            .map(|b| format!("{b:?}").to_lowercase())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    println!("buttons_held={held_str}");
+                    match last_event {
+                        Some(ev) => {
+                            let kind = format!("{:?}", ev.kind);
+                            let extra = match (ev.button, ev.scroll_dir) {
+                                (Some(b), _) => format!(" button={b:?}").to_lowercase(),
+                                (_, Some(d)) => format!(" dir={d:?}").to_lowercase(),
+                                _ => String::new(),
+                            };
+                            let mods_str = mods_to_str(&ev.mods);
+                            let mods_part = if mods_str.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" mods={mods_str}")
+                            };
+                            println!(
+                                "last_event={} ({},{}){}{} at {}",
+                                kind, ev.col, ev.row, extra, mods_part, ev.ts_unix
+                            );
+                        }
+                        None => println!("last_event=none"),
+                    }
                 }
                 Format::Json => {
                     let v = serde_json::json!({
                         "mode": format!("{mode:?}"),
                         "encoding": format!("{encoding:?}"),
                         "enabled": mode != MouseMode::None,
+                        "size": { "cols": size.cols, "rows": size.rows },
+                        "cursor": cursor.map(|p| serde_json::json!({"col": p.col, "row": p.row})),
+                        "buttons_held": buttons_held
+                            .iter()
+                            .map(|b| format!("{b:?}").to_lowercase())
+                            .collect::<Vec<_>>(),
+                        "last_event": last_event,
                     });
                     println!("{v}");
                 }
@@ -309,6 +359,20 @@ async fn run_state(name: String, format: Format) -> Result<()> {
         Response::Error { message } => bail!("{message}"),
         other => bail!("Unexpected response: {other:?}"),
     }
+}
+
+fn mods_to_str(mods: &crate::daemon::protocol::MouseMods) -> String {
+    let mut parts = Vec::new();
+    if mods.ctrl {
+        parts.push("ctrl");
+    }
+    if mods.shift {
+        parts.push("shift");
+    }
+    if mods.alt {
+        parts.push("alt");
+    }
+    parts.join(",")
 }
 
 async fn send_action(name: &str, action: MouseAction, force: bool) -> Result<()> {

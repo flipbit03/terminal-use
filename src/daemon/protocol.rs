@@ -196,7 +196,7 @@ pub struct SessionInfo {
 }
 
 /// Cursor position.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CursorPos {
     pub row: u16,
     pub col: u16,
@@ -250,8 +250,38 @@ pub enum Response {
     MouseState {
         mode: MouseMode,
         encoding: MouseEncoding,
+        size: TermSize,
+        cursor: Option<CursorPos>,
+        buttons_held: Vec<MouseButton>,
+        last_event: Option<MouseLastEvent>,
     },
     Error {
         message: String,
     },
+}
+
+/// Kind of the most recent mouse event tu emitted (for `mouse state`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MouseEventKind {
+    Down,
+    Up,
+    Move,
+    DragMove,
+    Scroll,
+}
+
+/// Snapshot of the last mouse event written to the PTY for this session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MouseLastEvent {
+    pub kind: MouseEventKind,
+    pub col: u16,
+    pub row: u16,
+    /// Some for Down/Up/DragMove; None for Move (no button) and Scroll
+    /// (direction is in `scroll_dir` instead).
+    pub button: Option<MouseButton>,
+    pub scroll_dir: Option<ScrollDir>,
+    pub mods: MouseMods,
+    /// Unix-epoch seconds when tu emitted the event.
+    pub ts_unix: u64,
 }

@@ -5,7 +5,8 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
 use crate::daemon::protocol::{
-    MouseAction, MouseEncoding, MouseMode, MouseTarget, Request, Response, SessionInfo, TermSize,
+    MouseAction, MouseEncoding, MouseEventKind, MouseLastEvent, MouseMode, MouseTarget, Request,
+    Response, SessionInfo, TermSize,
 };
 use crate::daemon::session::Session;
 use crate::mouse::{self, WireEvent};
@@ -356,6 +357,10 @@ impl SessionManager {
                 Response::MouseState {
                     mode: vt_mode_to_proto(screen.mouse_protocol_mode()),
                     encoding: vt_encoding_to_proto(screen.mouse_protocol_encoding()),
+                    size: session.size.clone(),
+                    cursor: session.mouse.cursor,
+                    buttons_held: session.mouse.buttons_held.clone(),
+                    last_event: session.mouse.last_event.clone(),
                 }
             }
             None => Response::Error {
@@ -365,7 +370,7 @@ impl SessionManager {
     }
 
     async fn handle_mouse(&mut self, name: &str, action: MouseAction, force: bool) -> Response {
-        let session = match self.sessions.get(name) {
+        let session = match self.sessions.get_mut(name) {
             Some(s) => s,
             None => {
                 return Response::Error {
@@ -459,12 +464,114 @@ impl SessionManager {
         };
 
         match session.write_bytes(&bytes) {
-            Ok(()) => Response::Ok,
+            Ok(()) => {
+                update_tracker(&mut session.mouse, &events);
+                Response::Ok
+            }
             Err(e) => Response::Error {
                 message: format!("Mouse write failed: {e}"),
             },
         }
     }
+}
+
+fn update_tracker(tracker: &mut crate::daemon::session::MouseTracker, events: &[WireEvent]) {
+    for ev in events {
+        match *ev {
+            WireEvent::Down {
+                col,
+                row,
+                button,
+                mods,
+            } => {
+                tracker.record_position(col, row);
+                tracker.press(button);
+                tracker.last_event = Some(MouseLastEvent {
+                    kind: MouseEventKind::Down,
+                    col,
+                    row,
+                    button: Some(button),
+                    scroll_dir: None,
+                    mods,
+                    ts_unix: now_unix(),
+                });
+            }
+            WireEvent::Up {
+                col,
+                row,
+                button,
+                mods,
+            } => {
+                tracker.record_position(col, row);
+                tracker.release(button);
+                tracker.last_event = Some(MouseLastEvent {
+                    kind: MouseEventKind::Up,
+                    col,
+                    row,
+                    button: Some(button),
+                    scroll_dir: None,
+                    mods,
+                    ts_unix: now_unix(),
+                });
+            }
+            WireEvent::Move { col, row, mods } => {
+                tracker.record_position(col, row);
+                tracker.last_event = Some(MouseLastEvent {
+                    kind: MouseEventKind::Move,
+                    col,
+                    row,
+                    button: None,
+                    scroll_dir: None,
+                    mods,
+                    ts_unix: now_unix(),
+                });
+            }
+            WireEvent::DragMove {
+                col,
+                row,
+                button,
+                mods,
+            } => {
+                tracker.record_position(col, row);
+                tracker.last_event = Some(MouseLastEvent {
+                    kind: MouseEventKind::DragMove,
+                    col,
+                    row,
+                    button: Some(button),
+                    scroll_dir: None,
+                    mods,
+                    ts_unix: now_unix(),
+                });
+            }
+            WireEvent::Scroll {
+                col,
+                row,
+                dir,
+                mods,
+            } => {
+                // Scroll is position-independent in the agent's mental model;
+                // don't move the synthetic cursor. last_event still records
+                // the coords that went on the wire.
+                tracker.last_event = Some(MouseLastEvent {
+                    kind: MouseEventKind::Scroll,
+                    col,
+                    row,
+                    button: None,
+                    scroll_dir: Some(dir),
+                    mods,
+                    ts_unix: now_unix(),
+                });
+            }
+        }
+    }
+}
+
+fn now_unix() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn vt_mode_to_proto(mode: vt100::MouseProtocolMode) -> MouseMode {
@@ -754,6 +861,167 @@ mod tests {
     fn interpolate_short_emits_nothing() {
         assert!(interpolate_path(0, 0, 1, 0).is_empty());
         assert!(interpolate_path(0, 0, 0, 0).is_empty());
+    }
+
+    fn ev_down(col: u16, row: u16, button: MouseButton) -> WireEvent {
+        WireEvent::Down {
+            col,
+            row,
+            button,
+            mods: Default::default(),
+        }
+    }
+    fn ev_up(col: u16, row: u16, button: MouseButton) -> WireEvent {
+        WireEvent::Up {
+            col,
+            row,
+            button,
+            mods: Default::default(),
+        }
+    }
+
+    #[test]
+    fn tracker_down_records_position_and_held_button() {
+        let mut t = crate::daemon::session::MouseTracker::default();
+        update_tracker(&mut t, &[ev_down(10, 5, MouseButton::Left)]);
+        assert_eq!(
+            t.cursor,
+            Some(crate::daemon::protocol::CursorPos { row: 5, col: 10 })
+        );
+        assert_eq!(t.buttons_held, vec![MouseButton::Left]);
+        let last = t.last_event.as_ref().unwrap();
+        assert_eq!(last.kind, MouseEventKind::Down);
+        assert_eq!(last.col, 10);
+        assert_eq!(last.row, 5);
+    }
+
+    #[test]
+    fn tracker_up_releases_button_keeps_cursor() {
+        let mut t = crate::daemon::session::MouseTracker::default();
+        update_tracker(
+            &mut t,
+            &[
+                ev_down(10, 5, MouseButton::Left),
+                ev_up(11, 5, MouseButton::Left),
+            ],
+        );
+        assert!(t.buttons_held.is_empty());
+        assert_eq!(
+            t.cursor,
+            Some(crate::daemon::protocol::CursorPos { row: 5, col: 11 })
+        );
+    }
+
+    #[test]
+    fn tracker_click_leaves_no_held_buttons() {
+        let mut t = crate::daemon::session::MouseTracker::default();
+        update_tracker(
+            &mut t,
+            &[
+                ev_down(0, 0, MouseButton::Left),
+                ev_up(0, 0, MouseButton::Left),
+            ],
+        );
+        assert!(t.buttons_held.is_empty());
+    }
+
+    #[test]
+    fn tracker_drag_ends_clean() {
+        let mut t = crate::daemon::session::MouseTracker::default();
+        let evs = vec![
+            ev_down(0, 0, MouseButton::Left),
+            WireEvent::DragMove {
+                col: 1,
+                row: 0,
+                button: MouseButton::Left,
+                mods: Default::default(),
+            },
+            WireEvent::DragMove {
+                col: 2,
+                row: 0,
+                button: MouseButton::Left,
+                mods: Default::default(),
+            },
+            ev_up(3, 0, MouseButton::Left),
+        ];
+        update_tracker(&mut t, &evs);
+        assert!(t.buttons_held.is_empty());
+        assert_eq!(
+            t.cursor,
+            Some(crate::daemon::protocol::CursorPos { row: 0, col: 3 })
+        );
+        let last = t.last_event.as_ref().unwrap();
+        assert_eq!(last.kind, MouseEventKind::Up);
+    }
+
+    #[test]
+    fn tracker_two_buttons_held_in_order() {
+        let mut t = crate::daemon::session::MouseTracker::default();
+        update_tracker(
+            &mut t,
+            &[
+                ev_down(0, 0, MouseButton::Left),
+                ev_down(0, 0, MouseButton::Right),
+            ],
+        );
+        assert_eq!(t.buttons_held, vec![MouseButton::Left, MouseButton::Right]);
+        update_tracker(&mut t, &[ev_up(0, 0, MouseButton::Left)]);
+        assert_eq!(t.buttons_held, vec![MouseButton::Right]);
+    }
+
+    #[test]
+    fn tracker_double_down_does_not_dup() {
+        let mut t = crate::daemon::session::MouseTracker::default();
+        update_tracker(
+            &mut t,
+            &[
+                ev_down(0, 0, MouseButton::Left),
+                ev_down(1, 0, MouseButton::Left),
+            ],
+        );
+        assert_eq!(t.buttons_held, vec![MouseButton::Left]);
+    }
+
+    #[test]
+    fn tracker_scroll_does_not_move_cursor() {
+        let mut t = crate::daemon::session::MouseTracker::default();
+        update_tracker(&mut t, &[ev_down(20, 10, MouseButton::Left)]);
+        update_tracker(&mut t, &[ev_up(20, 10, MouseButton::Left)]);
+        let cursor_before = t.cursor;
+        update_tracker(
+            &mut t,
+            &[WireEvent::Scroll {
+                col: 0,
+                row: 0,
+                dir: ScrollDir::Down,
+                mods: Default::default(),
+            }],
+        );
+        assert_eq!(t.cursor, cursor_before);
+        assert_eq!(t.last_event.as_ref().unwrap().kind, MouseEventKind::Scroll);
+    }
+
+    #[test]
+    fn tracker_clamp_clears_cursor_when_out_of_bounds() {
+        let mut t = crate::daemon::session::MouseTracker {
+            cursor: Some(crate::daemon::protocol::CursorPos { row: 30, col: 90 }),
+            ..Default::default()
+        };
+        t.clamp_to_size(&TermSize { cols: 80, rows: 24 });
+        assert!(t.cursor.is_none());
+    }
+
+    #[test]
+    fn tracker_clamp_keeps_cursor_when_in_bounds() {
+        let mut t = crate::daemon::session::MouseTracker {
+            cursor: Some(crate::daemon::protocol::CursorPos { row: 10, col: 50 }),
+            ..Default::default()
+        };
+        t.clamp_to_size(&TermSize { cols: 80, rows: 24 });
+        assert_eq!(
+            t.cursor,
+            Some(crate::daemon::protocol::CursorPos { row: 10, col: 50 })
+        );
     }
 
     #[test]
