@@ -250,6 +250,12 @@ pub enum Response {
         rows_ansi: Vec<String>,
         rows: u16,
         cols: u16,
+        /// Synthetic mouse cursor position (None until first event; cleared on
+        /// resize-out-of-bounds). Monitor paints a △ overlay at this cell.
+        mouse_cursor: Option<CursorPos>,
+        /// True when at least one mouse button is currently held; switches the
+        /// cursor glyph from outline to filled.
+        mouse_held: bool,
     },
     Scrollback {
         content: String,
