@@ -2,11 +2,10 @@ pub async fn run() {
     print!(
         r#"tu ("terminal-use") -- headless virtual terminal for AI agents
 
-Spawn terminal apps, read the screen, send keystrokes. No GUI needed.
-Default terminal size: 120x40 (TERM=xterm-256color).
+Spawn terminal apps, read the screen, send keystrokes, drive the mouse.
+No GUI needed. Default terminal size: 120x40 (TERM=xterm-256color).
 
 Almost every command takes `--name <s>` to pick a session (default: "default").
-Omitted from the lines below to keep the cheatsheet tight.
 
 COMMANDS:
   run <cmd> [args...]             Spawn a process in a new virtual terminal
