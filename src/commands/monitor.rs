@@ -51,11 +51,13 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
     let mut last_term_size = get_terminal_size();
     let mut last_fetch = std::time::Instant::now() - Duration::from_secs(10); // force immediate first fetch
     let mut last_change = std::time::Instant::now();
-    // Diff state: the previously-emitted frame as a vector of one ANSI string per
-    // visible terminal row. Each new frame is rendered into a fresh `Vec<String>`
-    // and compared row-by-row; only changed rows are written to stdout. This is
-    // the bulk of the flicker fix — most rows stay byte-identical between frames.
-    let mut prev_frame: Option<Vec<String>> = None;
+    // True when the next emission needs to wipe the alt screen first
+    // (startup, session switch, error, resize). Set on entry to those
+    // states; cleared after the next successful emit.
+    let mut needs_clear = true;
+    // Track the previous frame's row count so we can clear leftovers when
+    // the new frame is shorter (e.g. switching to a smaller session).
+    let mut prev_row_count: usize = 0;
     // True the first time we observe a session after the waiting state. We
     // give the inner app a brief moment to finish its initial paint before
     // snapshotting — without this, a freshly-spawned mc/vim/htop is often
@@ -68,10 +70,10 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
         // Detect terminal resize → clear screen + force redraw
         let term_size = get_terminal_size();
         if term_size != last_term_size {
-            print!("\x1b[2J");
             last_term_size = term_size;
             last_rows = None;
-            prev_frame = None;
+            needs_clear = true;
+            prev_row_count = 0;
             last_fetch = std::time::Instant::now() - fetch_interval; // force refetch
         }
 
@@ -82,7 +84,8 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             let sessions = get_session_names().await.unwrap_or_default();
             if sessions.is_empty() {
                 draw_waiting_screen()?;
-                prev_frame = None;
+                needs_clear = true;
+                prev_row_count = 0;
                 just_attached = true;
                 match tty.read_key(Duration::from_millis(FRAME_INTERVAL_MS))? {
                     Some(Key::Quit) => break,
@@ -130,12 +133,19 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                         mouse_cursor,
                         mouse_held,
                     );
-                    emit_frame_diff(prev_frame.as_deref(), &new_frame, &sessions[*current_idx])?;
-                    prev_frame = Some(new_frame);
+                    emit_frame_full(
+                        needs_clear,
+                        prev_row_count,
+                        &new_frame,
+                        &sessions[*current_idx],
+                    )?;
+                    needs_clear = false;
+                    prev_row_count = new_frame.len();
                 }
                 Ok(Response::Error { message: _ }) => {
                     last_rows = None;
-                    prev_frame = None;
+                    needs_clear = true;
+                    prev_row_count = 0;
                 }
                 _ => {}
             }
@@ -148,7 +158,8 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             Some(Key::Left) if *current_idx > 0 => {
                 *current_idx -= 1;
                 last_rows = None;
-                prev_frame = None;
+                needs_clear = true;
+                prev_row_count = 0;
                 last_fetch = std::time::Instant::now() - fetch_interval; // force refetch
             }
             Some(Key::Right) => {
@@ -156,7 +167,8 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                 if *current_idx + 1 < sessions.len() {
                     *current_idx += 1;
                     last_rows = None;
-                    prev_frame = None;
+                    needs_clear = true;
+                    prev_row_count = 0;
                     last_fetch = std::time::Instant::now() - fetch_interval;
                 }
             }
@@ -393,43 +405,36 @@ fn mouse_cursor_glyph(held: bool) -> &'static str {
     }
 }
 
-/// Diff the new frame against the previously-emitted one and only re-emit rows
-/// that actually changed.
+/// Emit every row of the new frame. `needs_clear` triggers a full
+/// alt-screen wipe + OSC title before the rows go down — used on startup,
+/// session switches, errors, and terminal resizes.
 ///
-/// (We avoid DECSET 2026 / synchronized output mode here: in practice it
-/// behaves inconsistently across the terminals we care about — at least one
-/// SSH terminal we tested ate frames mid-sync. The diff alone gives most of
-/// the flicker reduction; the per-row CSI 2K + write is small enough that
-/// terminals with their own paint coalescing handle it cleanly.)
-fn emit_frame_diff(prev: Option<&[String]>, new: &[String], session_name: &str) -> Result<()> {
+/// Why no diff? An earlier diff-based emitter cached a partial first frame
+/// (when the inner app was mid-paint) and subsequent ticks saw matching
+/// strings, so changed rows below the partial portion were never re-sent.
+/// The bandwidth saved was not worth the rendering bugs. Every frame now
+/// re-emits all rows; per-row `CSI 2K` keeps each line clean, and most
+/// terminals coalesce paint such that the user sees no flicker.
+fn emit_frame_full(
+    needs_clear: bool,
+    prev_row_count: usize,
+    new: &[String],
+    session_name: &str,
+) -> Result<()> {
     let mut out = io::stdout().lock();
 
-    // First emission after a transition (startup, session switch, error,
-    // resize) — wipe the alt screen so we know we're rendering on top of a
-    // clean slate. Without this, leftovers from the waiting screen, a previous
-    // session's frame, or partial mid-render artifacts can survive on rows
-    // the diff later considers "unchanged" and never re-emits.
-    if prev.is_none() {
+    if needs_clear {
         write!(out, "\x1b[2J\x1b[H")?;
         write!(out, "\x1b]0;tu monitor: {session_name}\x07")?;
     }
 
-    let prev_len = prev.map(|p| p.len()).unwrap_or(0);
     for (i, line) in new.iter().enumerate() {
-        let unchanged = prev
-            .and_then(|p| p.get(i))
-            .map(|s| s == line)
-            .unwrap_or(false);
-        if unchanged {
-            continue;
-        }
-        // 1-indexed terminal row.
         let row = i + 1;
         write!(out, "\x1b[{row};1H\x1b[2K{line}")?;
     }
 
-    // If the new frame is shorter than the previous one, clear what's beyond.
-    if new.len() < prev_len {
+    // Clear leftovers if the previous frame was taller (e.g. resized smaller).
+    if new.len() < prev_row_count {
         write!(out, "\x1b[{};1H\x1b[J", new.len() + 1)?;
     }
 
