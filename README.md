@@ -15,7 +15,7 @@ https://github.com/user-attachments/assets/8dd87972-2ef5-4104-9074-52b6ee528e08
 A real terminal emulator: anything that runs in your real terminal runs in `tu`.
 
 - **Curses / TUI apps**: vim, less, htop, mc, top, nano, lazygit, tig, ranger.
-- **Modern shell integration**: OSC 133 semantic prompts, OSC 7 working-directory hints, OSC 8 hyperlinks, APC, focus-event reporting — all consumed silently instead of leaking into the output as `^[…` artifacts.
+- **Modern shell integration**: OSC 133 semantic prompts, OSC 7 working-directory hints, OSC 8 hyperlinks, APC, focus-event reporting.
 - **Terminal queries**: DA / DCS terminfo / DECRQSS replies are answered automatically, so curses apps don't hang on startup waiting for terminal capability responses.
 - **Mouse**: synthetic mouse input (click, drag, move, scroll), text-based targeting (`--on-text`, `--on-regex`), modifier keys, multi-click. Cursor glides between positions for real-mouse motion semantics.
 - **Live monitor**: 30 fps read-only view with diff-based emission — fluid over SSH.
@@ -110,8 +110,8 @@ tu CLI --> Unix socket (JSON) --> daemon --> PTY + alacritty_terminal
                                           fed back to the inner app
 ```
 
-- The emulator is alacritty's. It handles the full xterm command set including modern shell-integration sequences. Unknown / unsupported escapes are consumed cleanly rather than leaking into cell content.
-- Replies the terminal owes the inner app (Device Attributes, cursor reports, DCS terminfo queries) are forwarded to the PTY via a writeback path — so vim, less, mc and friends boot without hanging.
+- The emulator is alacritty's. It handles the full xterm command set, including modern shell-integration sequences.
+- When the inner app queries terminal capabilities (Device Attributes, cursor reports, terminfo lookups), `tu` answers — so vim, less, mc and friends don't hang on startup waiting for a reply.
 - The daemon auto-starts on first use and auto-exits after 8 hours of inactivity.
 
 ## Defaults
