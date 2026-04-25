@@ -242,9 +242,9 @@ fn render_screen(screen: &ScreenSnapshot, config: &ScreenshotConfig) -> Result<R
 const MOUSE_CURSOR_RGBA: Rgba<u8> = Rgba([255, 0, 200, 255]);
 const MOUSE_CURSOR_HELD_FG: Rgba<u8> = Rgba([255, 255, 255, 255]);
 
-/// Paint the synthetic mouse cursor at the given cell as a triangular caret
-/// glyph (`^`). Idle = magenta `^` on the existing background; held =
-/// bright-white `^` on a filled magenta cell, so a held button is unmistakable.
+/// Paint the synthetic mouse cursor at the given cell as a triangle glyph
+/// (`△`). Idle = magenta `△` on the existing background; held =
+/// bright-white `△` on a filled magenta cell, so a held button is unmistakable.
 #[allow(clippy::too_many_arguments)]
 fn paint_mouse_cursor(
     image: &mut RgbaImage,
@@ -262,15 +262,15 @@ fn paint_mouse_cursor(
     let h = line_height.ceil() as u32;
 
     let glyph_color = if held {
-        // Magenta cell behind a bright-white caret.
+        // Magenta cell behind a bright-white glyph.
         draw_filled_rect_mut(image, Rect::at(x, y).of_size(w, h), MOUSE_CURSOR_RGBA);
         MOUSE_CURSOR_HELD_FG
     } else {
-        // Caret on top of whatever the inner app drew.
+        // Glyph on top of whatever the inner app drew.
         MOUSE_CURSOR_RGBA
     };
 
-    draw_text_mut(image, glyph_color, x, y, scale, font, "^");
+    draw_text_mut(image, glyph_color, x, y, scale, font, "△");
 }
 
 #[cfg(test)]
