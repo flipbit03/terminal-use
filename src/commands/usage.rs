@@ -4,35 +4,36 @@ pub async fn run() {
 
 Spawn terminal apps, read the screen, send keystrokes. No GUI needed.
 Default terminal size: 120x40 (TERM=xterm-256color).
-All commands target the "default" session unless --name is given.
+
+Almost every command takes `--name <s>` to pick a session (default: "default").
+Omitted from the lines below to keep the cheatsheet tight.
 
 COMMANDS:
   run <cmd> [args...]             Spawn a process in a new virtual terminal
-    --name <s>                      Session name (default: "default")
     --size <CxR>                    Terminal size (default: 120x40)
     --scrollback <n>                Scrollback lines (default: 1000)
     --env KEY=VAL                   Extra env vars (repeatable)
     --cwd <path>                    Working directory
     --term <TERM>                   TERM value (default: xterm-256color)
     --shell                         Wrap in $SHELL -c "..."
-  kill [--name <s>]               Kill process and remove session
+  kill                            Kill process and remove session
   list                            List active sessions
-  status [--name <s>]             Session info: pid, alive/exited, exit code, size
+  status                          Session info: pid, alive/exited, exit code, size
 
-  screenshot [--name <s>]         Capture the terminal screen as text
+  screenshot                      Capture the terminal screen as text
     --png                           Render as a PNG image instead of text
     --output <file>                 Output file path (default: auto temp file)
     --stdout                        Write PNG bytes to stdout (with --png)
     --font <path>                   Optional TTF font file (bundled: JetBrains Mono)
     --font-size <px>                Font size in pixels (default: 14, with --png)
     --no-cursor                     Suppress the magenta △ overlay (with --png)
-  cursor [--name <s>]             Print cursor position as row,col
-  scrollback [--name <s>]         Print scrollback buffer
+  cursor                          Print cursor position as row,col
+  scrollback                      Print scrollback buffer
     --lines <n>                     How many lines (default: all)
 
-  type <text> [--name <s>]        Type literal text
-  press <key>... [--name <s>]     Send keystrokes (space-separated)
-  paste <text> [--name <s>]       Bracketed paste
+  type <text>                     Type literal text
+  press <key>...                  Send keystrokes (space-separated)
+  paste <text>                    Bracketed paste
 
   mouse click <col> <row>         Click at column,row (0-based, like cursor)
     --button left|right|middle      Default: left
@@ -46,7 +47,7 @@ COMMANDS:
   mouse move <col> <row>          Move cursor to col,row
   mouse drag <c1> <r1> <c2> <r2>  Drag from (c1,r1) to (c2,r2)
   mouse scroll up|down|left|right [<col> <row>] [--amount N]
-  mouse state [--name <s>]        Print mouse status (or "disabled")
+  mouse state                     Print mouse status (or "disabled")
 
 MOUSE CURSOR DISPLAY:
   When tu has a synthetic mouse cursor it shows up as a magenta △ glyph
@@ -65,13 +66,13 @@ MOUSE TARGETING:
   Run `tu mouse state` first to check the app accepts mouse input. If it
   doesn't, the click errors out — pass --force to send the bytes anyway.
 
-  resize <CxR> [--name <s>]      Resize terminal (e.g. 160x50)
-  wait [--name <s>]               Wait for a condition
+  resize <CxR>                    Resize terminal (e.g. 160x50)
+  wait                            Wait for a condition
     --stable <ms>                   Screen unchanged for N ms
     --text <regex>                  Regex matches screen content
     --timeout <ms>                  Max wait (default: 5000)
 
-  monitor [--name <s>]            Live read-only view of a session (← → to switch)
+  monitor                         Live read-only view of a session (← → to switch)
   daemon start|stop|status        Manage background daemon
   self update [--check]          Update tu to the latest version
 
@@ -98,7 +99,7 @@ EXAMPLES:
   tu press Escape : w q Enter          Save and quit vim
   tu type "hello world"                Type text into the terminal
   tu wait --text "Complete" --timeout 10000
-  tu mouse state                       → mode=ButtonMotion encoding=Sgr
+  tu mouse state                       Show mouse status + cursor + held buttons
   tu mouse click 50 20                 Left-click at (col=50, row=20)
   tu mouse click --on-text "OK"        Click the OK button by label
   tu mouse click --on-text "Buy" --clicks 2   Double-click on "Buy"
