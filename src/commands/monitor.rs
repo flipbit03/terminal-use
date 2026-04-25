@@ -97,9 +97,11 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             }
 
             // Just emerged from the waiting state — let the inner app finish
-            // its initial paint before snapshotting.
+            // its initial paint before snapshotting. mc on macOS routinely
+            // takes ~250-400ms to fully draw its panels; 400ms is a
+            // conservative buffer that still feels instant interactively.
             if just_attached {
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                tokio::time::sleep(Duration::from_millis(400)).await;
                 just_attached = false;
             }
 

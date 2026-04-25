@@ -163,7 +163,7 @@ impl Session {
                 if ch.is_empty() {
                     line.push(' ');
                 } else {
-                    line.push_str(&ch);
+                    push_sanitized(&mut line, &ch);
                 }
             }
             let trimmed = line.trim_end();
@@ -246,7 +246,7 @@ impl Session {
                 if ch.is_empty() {
                     line.push(' ');
                 } else {
-                    line.push_str(&ch);
+                    push_sanitized(&mut line, &ch);
                 }
             }
 
@@ -339,6 +339,22 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+/// Append a cell's text content to `out`, replacing any control byte (< 0x20,
+/// excluding tab) with a space. A misbehaving inner app — or a sequence the
+/// vt100 parser doesn't recognise — can leave a stray ESC (0x1B) inside a
+/// cell; if we forwarded that raw it would re-enter the user's terminal as
+/// the start of an escape sequence and render as caret-notation (`^[`),
+/// corrupting the row.
+fn push_sanitized(out: &mut String, content: &str) {
+    for c in content.chars() {
+        if (c as u32) < 0x20 && c != '\t' {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
     }
 }
 
