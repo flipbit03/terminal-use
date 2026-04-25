@@ -30,6 +30,12 @@ pub struct ScreenshotConfig {
     pub font_path: Option<String>,
     pub font_size: f32,
     pub line_height: f32,
+    /// If `Some((col, row))` (0-based), paint a magenta overlay on that cell to
+    /// show tu's synthetic mouse cursor.
+    pub mouse_cursor: Option<(u16, u16)>,
+    /// When `mouse_cursor` is set: `true` paints a filled magenta block (a
+    /// button is currently held), `false` paints just an outline (idle cursor).
+    pub mouse_held: bool,
 }
 
 impl Default for ScreenshotConfig {
@@ -38,6 +44,8 @@ impl Default for ScreenshotConfig {
             font_path: None,
             font_size: 14.0,
             line_height: 1.2,
+            mouse_cursor: None,
+            mouse_held: false,
         }
     }
 }
@@ -70,6 +78,15 @@ impl Screenshot {
     /// Override the font size in pixels (default: 14.0).
     pub fn font_size(mut self, size: f32) -> Self {
         self.config.font_size = size;
+        self
+    }
+
+    /// Paint a magenta overlay on the given cell to show tu's synthetic mouse
+    /// cursor. `held = true` draws a filled block (button held), `false` draws
+    /// an outline (idle cursor).
+    pub fn mouse_cursor(mut self, col: u16, row: u16, held: bool) -> Self {
+        self.config.mouse_cursor = Some((col, row));
+        self.config.mouse_held = held;
         self
     }
 
@@ -202,7 +219,58 @@ fn render_screen(screen: &ScreenSnapshot, config: &ScreenshotConfig) -> Result<R
         }
     }
 
+    if let Some((cur_col, cur_row)) = config.mouse_cursor {
+        if cur_col < screen.cols() && cur_row < screen.rows() {
+            paint_mouse_cursor(
+                &mut image,
+                cur_col,
+                cur_row,
+                char_width,
+                line_height,
+                scale,
+                &font,
+                config.mouse_held,
+            );
+        }
+    }
+
     Ok(image)
+}
+
+/// tu's signature mouse-cursor magenta. Bright enough to spot at a glance,
+/// uncommon enough to avoid colliding with typical TUI palettes.
+const MOUSE_CURSOR_RGBA: Rgba<u8> = Rgba([255, 0, 200, 255]);
+const MOUSE_CURSOR_HELD_FG: Rgba<u8> = Rgba([255, 255, 255, 255]);
+
+/// Paint the synthetic mouse cursor at the given cell as a triangle glyph
+/// (`△`). Idle = magenta `△` on the existing background; held =
+/// bright-white `△` on a filled magenta cell, so a held button is unmistakable.
+#[allow(clippy::too_many_arguments)]
+fn paint_mouse_cursor(
+    image: &mut RgbaImage,
+    cur_col: u16,
+    cur_row: u16,
+    char_width: f32,
+    line_height: f32,
+    scale: PxScale,
+    font: &FontRef<'_>,
+    held: bool,
+) {
+    let x = (cur_col as f32 * char_width).round() as i32;
+    let y = (cur_row as f32 * line_height).round() as i32;
+    let w = char_width.ceil() as u32;
+    let h = line_height.ceil() as u32;
+
+    let glyph_color = if held {
+        // Magenta cell behind a bright-white glyph.
+        draw_filled_rect_mut(image, Rect::at(x, y).of_size(w, h), MOUSE_CURSOR_RGBA);
+        MOUSE_CURSOR_HELD_FG
+    } else {
+        // Glyph on top of whatever the inner app drew.
+        MOUSE_CURSOR_RGBA
+    };
+
+    draw_text_mut(image, glyph_color, x, y, scale, font, "△");
 }
 
 #[cfg(test)]
@@ -214,7 +282,7 @@ mod tests {
 
     #[test]
     fn saves_png() {
-        let mut parser = vt100::Parser::new(4, 20, 0);
+        let mut parser = crate::emu::Parser::new(4, 20, 0);
         parser.process(b"\x1b[32mhello\x1b[0m");
         let screenshot = Screenshot::new(ScreenSnapshot::from_vt100(parser.screen()));
 
@@ -236,7 +304,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_font_size() {
-        let mut parser = vt100::Parser::new(2, 4, 0);
+        let mut parser = crate::emu::Parser::new(2, 4, 0);
         parser.process(b"hi");
         let screenshot =
             Screenshot::new(ScreenSnapshot::from_vt100(parser.screen())).font_size(0.0);

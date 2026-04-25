@@ -8,18 +8,58 @@ use nix::unistd::Pid;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
-use crate::daemon::protocol::{CursorPos, SessionInfo, TermSize};
+use crate::daemon::protocol::{CursorPos, MouseButton, MouseLastEvent, SessionInfo, TermSize};
 use crate::pty;
+
+/// Tu's idea of the synthetic mouse state for a session: where the cursor was
+/// left after the most recent emitted event, which buttons are still held
+/// (down without a matching up), and a snapshot of the most recent event.
+///
+/// The inner application is under no obligation to render the mouse cursor,
+/// so this is the only authoritative source for "where am I and what's held"
+/// when an agent loses track between calls.
+#[derive(Debug, Default)]
+pub struct MouseTracker {
+    pub cursor: Option<CursorPos>,
+    pub buttons_held: Vec<MouseButton>,
+    pub last_event: Option<MouseLastEvent>,
+}
+
+impl MouseTracker {
+    pub fn record_position(&mut self, col: u16, row: u16) {
+        self.cursor = Some(CursorPos { row, col });
+    }
+
+    pub fn press(&mut self, button: MouseButton) {
+        if !self.buttons_held.contains(&button) {
+            self.buttons_held.push(button);
+        }
+    }
+
+    pub fn release(&mut self, button: MouseButton) {
+        self.buttons_held.retain(|b| *b != button);
+    }
+
+    /// Clear the cursor if it is now outside the new size.
+    pub fn clamp_to_size(&mut self, size: &TermSize) {
+        if let Some(pos) = self.cursor {
+            if pos.col >= size.cols || pos.row >= size.rows {
+                self.cursor = None;
+            }
+        }
+    }
+}
 
 /// A terminal session: a child process in a PTY with a vt100 screen buffer.
 pub struct Session {
     pub name: String,
     pub master_fd: OwnedFd,
     pub pid: Pid,
-    pub parser: Arc<Mutex<vt100::Parser>>,
+    pub parser: Arc<Mutex<crate::emu::Parser>>,
     pub size: TermSize,
     pub alive: bool,
     pub exit_code: Option<i32>,
+    pub mouse: MouseTracker,
 }
 
 impl Session {
@@ -37,7 +77,7 @@ impl Session {
         shell: bool,
     ) -> Result<Self> {
         let pty_proc = pty::spawn::spawn(command, args, &size, env, cwd, term, shell)?;
-        let parser = vt100::Parser::new(size.rows, size.cols, scrollback);
+        let parser = crate::emu::Parser::new(size.rows, size.cols, scrollback);
 
         Ok(Self {
             name,
@@ -47,6 +87,7 @@ impl Session {
             size,
             alive: true,
             exit_code: None,
+            mouse: MouseTracker::default(),
         })
     }
 
@@ -54,14 +95,18 @@ impl Session {
     pub fn start_reader(&self) -> Result<()> {
         let parser = self.parser.clone();
 
-        // Duplicate the fd so the async reader owns it independently
-        let dup_fd = nix::unistd::dup(&self.master_fd).context("dup master_fd")?;
+        // Two dup'd fds: one for the async reader, one for the writeback path
+        // (parser-driven replies to terminal queries). They share the same
+        // underlying open description, so writes are atomic even though the
+        // tasks aren't synchronised at the fd level.
+        let read_fd = nix::unistd::dup(&self.master_fd).context("dup master_fd (read)")?;
+        let write_fd = nix::unistd::dup(&self.master_fd).context("dup master_fd (write)")?;
 
         tokio::spawn(async move {
             // Safety: we just dup'd the fd, so this is a valid owned fd.
-            let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd.as_raw_fd()) };
+            let std_file = unsafe { std::fs::File::from_raw_fd(read_fd.as_raw_fd()) };
             // Prevent the OwnedFd from closing separately — std_file now owns the underlying fd
-            std::mem::forget(dup_fd);
+            std::mem::forget(read_fd);
 
             let mut async_file = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
             let mut buf = [0u8; 4096];
@@ -70,8 +115,19 @@ impl Session {
                 match async_file.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let mut p = parser.lock().await;
-                        p.process(&buf[..n]);
+                        let pending = {
+                            let mut p = parser.lock().await;
+                            p.process(&buf[..n]);
+                            // The terminal may have queued replies (DA / cursor
+                            // position reports / DCS terminfo queries / etc.)
+                            // in response to queries from the inner app.
+                            // Forward them back to the PTY so curses apps
+                            // (vim, less, mc) don't hang waiting for them.
+                            p.take_pending_writes()
+                        };
+                        if !pending.is_empty() {
+                            let _ = crate::pty::input::write_to_pty(&write_fd, &pending);
+                        }
                     }
                     Err(e) => {
                         if e.raw_os_error() == Some(libc::EIO) {
@@ -112,22 +168,16 @@ impl Session {
     /// Get the current screen contents as plain text.
     pub async fn screenshot_text(&self) -> String {
         let parser = self.parser.lock().await;
-        let screen = parser.screen();
-        let mut lines = Vec::with_capacity(self.size.rows as usize);
-        for row in 0..self.size.rows {
-            let mut line = String::new();
-            for col in 0..self.size.cols {
-                let cell = screen.cell(row, col).unwrap();
-                let ch = cell.contents();
-                if ch.is_empty() {
-                    line.push(' ');
-                } else {
-                    line.push_str(&ch);
-                }
-            }
-            let trimmed = line.trim_end();
-            lines.push(trimmed.to_string());
-        }
+        let mut lines: Vec<String> = parser
+            .screen()
+            .text_rows()
+            .into_iter()
+            .map(|line| {
+                let mut sanitized = String::with_capacity(line.len());
+                push_sanitized(&mut sanitized, &line);
+                sanitized.trim_end().to_string()
+            })
+            .collect();
         while lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
@@ -151,8 +201,8 @@ impl Session {
 
         for row in 0..self.size.rows {
             let mut line = String::new();
-            let mut prev_fg = vt100::Color::Default;
-            let mut prev_bg = vt100::Color::Default;
+            let mut prev_fg = crate::emu::Color::Default;
+            let mut prev_bg = crate::emu::Color::Default;
             let mut prev_bold = false;
             let mut prev_inverse = false;
             let mut prev_underline = false;
@@ -205,7 +255,7 @@ impl Session {
                 if ch.is_empty() {
                     line.push(' ');
                 } else {
-                    line.push_str(&ch);
+                    push_sanitized(&mut line, ch);
                 }
             }
 
@@ -273,8 +323,9 @@ impl Session {
     pub async fn resize(&mut self, size: TermSize) -> Result<()> {
         pty::resize::resize_pty(&self.master_fd, &size)?;
         let mut parser = self.parser.lock().await;
-        parser.set_size(size.rows, size.cols);
-        self.size = size;
+        parser.screen_mut().set_size(size.rows, size.cols);
+        self.size = size.clone();
+        self.mouse.clamp_to_size(&size);
         Ok(())
     }
 
@@ -300,10 +351,26 @@ impl Drop for Session {
     }
 }
 
-fn push_fg_sgr(s: &mut String, color: vt100::Color) {
+/// Append a cell's text content to `out`, replacing any control byte (< 0x20,
+/// excluding tab) with a space. A misbehaving inner app — or a sequence the
+/// vt100 parser doesn't recognise — can leave a stray ESC (0x1B) inside a
+/// cell; if we forwarded that raw it would re-enter the user's terminal as
+/// the start of an escape sequence and render as caret-notation (`^[`),
+/// corrupting the row.
+fn push_sanitized(out: &mut String, content: &str) {
+    for c in content.chars() {
+        if (c as u32) < 0x20 && c != '\t' {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+}
+
+fn push_fg_sgr(s: &mut String, color: crate::emu::Color) {
     match color {
-        vt100::Color::Default => {}
-        vt100::Color::Idx(i) => {
+        crate::emu::Color::Default => {}
+        crate::emu::Color::Idx(i) => {
             if i < 8 {
                 s.push_str(&format!(";{}", 30 + i));
             } else if i < 16 {
@@ -312,16 +379,16 @@ fn push_fg_sgr(s: &mut String, color: vt100::Color) {
                 s.push_str(&format!(";38;5;{}", i));
             }
         }
-        vt100::Color::Rgb(r, g, b) => {
+        crate::emu::Color::Rgb(r, g, b) => {
             s.push_str(&format!(";38;2;{};{};{}", r, g, b));
         }
     }
 }
 
-fn push_bg_sgr(s: &mut String, color: vt100::Color) {
+fn push_bg_sgr(s: &mut String, color: crate::emu::Color) {
     match color {
-        vt100::Color::Default => {}
-        vt100::Color::Idx(i) => {
+        crate::emu::Color::Default => {}
+        crate::emu::Color::Idx(i) => {
             if i < 8 {
                 s.push_str(&format!(";{}", 40 + i));
             } else if i < 16 {
@@ -330,7 +397,7 @@ fn push_bg_sgr(s: &mut String, color: vt100::Color) {
                 s.push_str(&format!(";48;5;{}", i));
             }
         }
-        vt100::Color::Rgb(r, g, b) => {
+        crate::emu::Color::Rgb(r, g, b) => {
             s.push_str(&format!(";48;2;{};{};{}", r, g, b));
         }
     }

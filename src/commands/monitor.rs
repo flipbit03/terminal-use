@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::daemon::protocol::{Request, Response};
+use crate::daemon::protocol::{CursorPos, Request, Response};
 use crate::daemon::server::{ensure_daemon, send_request};
 
 /// Run the attach live viewer.
@@ -41,32 +41,50 @@ pub async fn run(initial_name: String) -> Result<()> {
     result
 }
 
+/// Frame interval for the live monitor. ~30fps; chosen high enough to feel
+/// fluid for drag/scroll visualization but not so high that we burn CPU.
+/// Monitor sessions are interactive and short-lived, so the extra work is fine.
+const FRAME_INTERVAL_MS: u64 = 33;
+
 async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> {
     let mut last_rows: Option<Vec<String>> = None;
     let mut last_term_size = get_terminal_size();
     let mut last_fetch = std::time::Instant::now() - Duration::from_secs(10); // force immediate first fetch
     let mut last_change = std::time::Instant::now();
+    // True when the next emission needs to wipe the alt screen first
+    // (startup, session switch, error, resize). Cleared after the next
+    // successful emit.
+    let mut needs_clear = true;
+    // Previously-emitted frame, kept for row-by-row diff. Each frame is built
+    // into a fresh `Vec<String>` and compared to this one; rows whose string
+    // matches the prior frame's are skipped, leaving the terminal undisturbed.
+    // This is the bulk of the flicker fix — at 30fps with a mostly-static
+    // inner app, a typical tick writes the status line and nothing else.
+    let mut prev_frame: Option<Vec<String>> = None;
 
-    let fetch_interval = Duration::from_millis(500);
+    let fetch_interval = Duration::from_millis(FRAME_INTERVAL_MS);
 
     loop {
         // Detect terminal resize → clear screen + force redraw
         let term_size = get_terminal_size();
         if term_size != last_term_size {
-            print!("\x1b[2J");
             last_term_size = term_size;
             last_rows = None;
+            needs_clear = true;
+            prev_frame = None;
             last_fetch = std::time::Instant::now() - fetch_interval; // force refetch
         }
 
-        // Fetch screen from daemon every ~500ms
+        // Fetch + redraw at ~30fps.
         if last_fetch.elapsed() >= fetch_interval {
             last_fetch = std::time::Instant::now();
 
             let sessions = get_session_names().await.unwrap_or_default();
             if sessions.is_empty() {
                 draw_waiting_screen()?;
-                match tty.read_key(Duration::from_millis(250))? {
+                needs_clear = true;
+                prev_frame = None;
+                match tty.read_key(Duration::from_millis(FRAME_INTERVAL_MS))? {
                     Some(Key::Quit) => break,
                     _ => continue,
                 }
@@ -86,14 +104,15 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                     rows_ansi,
                     rows,
                     cols,
+                    mouse_cursor,
+                    mouse_held,
                 }) => {
                     let changed = last_rows.as_ref() != Some(&rows_ansi);
                     if changed {
                         last_change = std::time::Instant::now();
                         last_rows = Some(rows_ansi.clone());
                     }
-                    // Always redraw to update the "last change" timer
-                    draw_frame(
+                    let new_frame = build_frame_strings(
                         &sessions,
                         *current_idx,
                         &rows_ansi,
@@ -101,21 +120,36 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                         cols,
                         term_size,
                         last_change.elapsed(),
+                        mouse_cursor,
+                        mouse_held,
+                    );
+                    emit_frame_diff(
+                        needs_clear,
+                        prev_frame.as_deref(),
+                        &new_frame,
+                        &sessions[*current_idx],
                     )?;
+                    needs_clear = false;
+                    prev_frame = Some(new_frame);
                 }
                 Ok(Response::Error { message: _ }) => {
                     last_rows = None;
+                    needs_clear = true;
+                    prev_frame = None;
                 }
                 _ => {}
             }
         }
 
-        // Check keys every 100ms (responsive input)
-        match tty.read_key(Duration::from_millis(100))? {
+        // Poll keys with a short timeout so the frame loop stays responsive.
+        // The wake-up effectively caps redraws at FRAME_INTERVAL_MS.
+        match tty.read_key(Duration::from_millis(FRAME_INTERVAL_MS))? {
             Some(Key::Quit) => break,
             Some(Key::Left) if *current_idx > 0 => {
                 *current_idx -= 1;
                 last_rows = None;
+                needs_clear = true;
+                prev_frame = None;
                 last_fetch = std::time::Instant::now() - fetch_interval; // force refetch
             }
             Some(Key::Right) => {
@@ -123,6 +157,8 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                 if *current_idx + 1 < sessions.len() {
                     *current_idx += 1;
                     last_rows = None;
+                    needs_clear = true;
+                    prev_frame = None;
                     last_fetch = std::time::Instant::now() - fetch_interval;
                 }
             }
@@ -151,7 +187,9 @@ fn draw_waiting_screen() -> Result<()> {
     let line3 = "Ctrl+C to quit";
     let box_width = 32;
     let pad_x = (cols as usize).saturating_sub(box_width) / 2;
-    let mid_row = rows / 2 - 2;
+    // saturating_sub guards against the overflow that would happen on a
+    // pathologically tiny terminal (rows < 4).
+    let mid_row = (rows / 2).saturating_sub(2).max(1);
     let p = " ".repeat(pad_x);
 
     write!(
@@ -222,7 +260,15 @@ fn format_elapsed(d: Duration) -> String {
     }
 }
 
-fn draw_frame(
+/// Render the current frame as a vector of ANSI strings, one per visible
+/// terminal row. Index 0 corresponds to terminal row 1.
+///
+/// The cursor overlay (when set) is appended to the cursor's row string as a
+/// trailing `CSI row;col H <glyph>` sequence. That way the diff naturally
+/// catches cursor movement: when the cursor moves, both the row it left and
+/// the row it entered get re-emitted, but no other rows do.
+#[allow(clippy::too_many_arguments)]
+fn build_frame_strings(
     sessions: &[String],
     active_idx: usize,
     rows_ansi: &[String],
@@ -230,74 +276,57 @@ fn draw_frame(
     sess_cols: u16,
     term_size: (u16, u16),
     since_last_change: Duration,
-) -> Result<()> {
+    mouse_cursor: Option<CursorPos>,
+    mouse_held: bool,
+) -> Vec<String> {
     let (term_cols, term_rows) = term_size;
-    let mut out = io::stdout().lock();
 
     let frame_width = sess_cols as usize + 2;
     let tcols = term_cols as usize;
     let cropped_right = tcols < frame_width;
 
-    // How many content rows can we show?
     // Layout: status(1) + [tab bar(1)] + top border(1) + content + bottom border(1)
-    let header_rows = if sessions.len() > 1 { 3u16 } else { 2u16 }; // status + [tabs] + top border
-    let available_content_rows = term_rows.saturating_sub(header_rows + 1); // +1 for bottom border
-    let content_rows_to_show = (sess_rows).min(available_content_rows);
+    let header_rows = if sessions.len() > 1 { 3u16 } else { 2u16 };
+    let available_content_rows = term_rows.saturating_sub(header_rows + 1);
+    let content_rows_to_show = sess_rows.min(available_content_rows);
     let cropped_bottom = content_rows_to_show < sess_rows;
 
-    // Set terminal window title via OSC
-    write!(out, "\x1b]0;tu monitor: {}\x07", &sessions[active_idx])?;
+    let mut frame: Vec<String> = Vec::with_capacity(term_rows as usize);
 
-    // Move cursor home
-    write!(out, "\x1b[H")?;
-
-    let mut row = 1u16;
-
-    // Row 1: status bar (always visible, pinned to top)
+    // Row 1: status bar
     let elapsed = format_elapsed(since_last_change);
     let status = if sessions.len() > 1 {
         format!("terminal-use monitor · last change {elapsed} · ← → switch · Ctrl+C detach")
     } else {
         format!("terminal-use monitor · last change {elapsed} · Ctrl+C detach")
     };
-    write!(out, "\x1b[{row};1H\x1b[2K\x1b[90m{status}\x1b[0m")?;
-    row += 1;
+    frame.push(format!("\x1b[90m{status}\x1b[0m"));
 
-    // Tab bar (only if multiple sessions)
-    if sessions.len() > 1 && row <= term_rows {
-        let tab_bar = build_tab_bar(sessions, active_idx);
-        write!(out, "\x1b[{row};1H\x1b[2K{tab_bar}")?;
-        row += 1;
+    // Tab bar
+    if sessions.len() > 1 {
+        frame.push(build_tab_bar(sessions, active_idx));
     }
 
-    // Top border: ┌─ name [COLSxROWS] ─...─┐
-    if row <= term_rows {
+    // Top border
+    {
         let title = format!(" {} [{}x{}] ", &sessions[active_idx], sess_cols, sess_rows);
-        let prefix_width = 2 + title.len(); // ┌─ + title
-        if cropped_right {
-            // Dashes fill up to tcols, last 3 chars become ···
+        let prefix_width = 2 + title.len();
+        let line = if cropped_right {
             let dash_space = tcols.saturating_sub(prefix_width);
             let (dashes, suffix) = if dash_space > 3 {
                 ("─".repeat(dash_space - 3), "···")
             } else {
                 ("─".repeat(dash_space), "")
             };
-            write!(
-                out,
-                "\x1b[{row};1H\x1b[2K\x1b[90m┌─\x1b[0m\x1b[1m{title}\x1b[0m\x1b[90m{dashes}{suffix}\x1b[0m",
-            )?;
+            format!("\x1b[90m┌─\x1b[0m\x1b[1m{title}\x1b[0m\x1b[90m{dashes}{suffix}\x1b[0m")
         } else {
             let dashes = "─".repeat(frame_width.saturating_sub(prefix_width + 1));
-            write!(
-                out,
-                "\x1b[{row};1H\x1b[2K\x1b[90m┌─\x1b[0m\x1b[1m{title}\x1b[0m\x1b[90m{dashes}┐\x1b[0m",
-            )?;
-        }
-        row += 1;
+            format!("\x1b[90m┌─\x1b[0m\x1b[1m{title}\x1b[0m\x1b[90m{dashes}┐\x1b[0m")
+        };
+        frame.push(line);
     }
 
-    // Content rows: │ <row content> │
-    // When cropped bottom, last 3 visible rows get · instead of │ as left border
+    // Content rows
     let fade_start = if cropped_bottom {
         content_rows_to_show.saturating_sub(3) as usize
     } else {
@@ -305,48 +334,114 @@ fn draw_frame(
     };
 
     for r in 0..content_rows_to_show as usize {
-        if row > term_rows {
-            break;
-        }
         let line = rows_ansi.get(r).map(|s| s.as_str()).unwrap_or("");
         let left_border = if r >= fade_start { "·" } else { "│" };
 
-        if !cropped_right {
-            let right_border = if r >= fade_start { "·" } else { "│" };
-            write!(
-                out,
-                "\x1b[{row};1H\x1b[2K\x1b[90m{left_border}\x1b[0m{line}\x1b[0m\x1b[{col}G\x1b[90m{right_border}\x1b[0m",
-                col = frame_width,
-            )?;
+        let mut row_str = if cropped_right {
+            format!("\x1b[90m{left_border}\x1b[0m{line}\x1b[0m")
         } else {
-            write!(
-                out,
-                "\x1b[{row};1H\x1b[2K\x1b[90m{left_border}\x1b[0m{line}\x1b[0m",
-            )?;
+            let right_border = if r >= fade_start { "·" } else { "│" };
+            format!(
+                "\x1b[90m{left_border}\x1b[0m{line}\x1b[0m\x1b[{col}G\x1b[90m{right_border}\x1b[0m",
+                col = frame_width,
+            )
+        };
+
+        // Cursor overlay: appended as a position-and-paint trailer, so the
+        // diff naturally re-emits this row when the cursor moves on/off it
+        // and skips it when the cursor stays put.
+        if let Some(cursor) = mouse_cursor {
+            if cursor.row as usize == r && cursor.col < sess_cols {
+                let term_row = frame.len() as u16 + 1; // 1-indexed terminal row
+                let term_col = 2 + cursor.col; // left border = col 1; content starts at col 2
+                let max_col = if term_cols >= 2 { term_cols } else { 1 };
+                if term_col <= max_col {
+                    row_str.push_str(&format!(
+                        "\x1b[{term_row};{term_col}H{}\x1b[0m",
+                        mouse_cursor_glyph(mouse_held)
+                    ));
+                }
+            }
         }
-        row += 1;
+
+        frame.push(row_str);
     }
 
-    // Bottom border: └─...─┘ (only if not cropped bottom)
-    if !cropped_bottom && row <= term_rows {
-        if cropped_right {
-            let dash_space = tcols.saturating_sub(1); // └ takes 1
+    // Bottom border (only if not cropped bottom)
+    if !cropped_bottom {
+        let line = if cropped_right {
+            let dash_space = tcols.saturating_sub(1);
             let (dashes, suffix) = if dash_space > 3 {
                 ("─".repeat(dash_space - 3), "···")
             } else {
                 ("─".repeat(dash_space), "")
             };
-            write!(out, "\x1b[{row};1H\x1b[2K\x1b[90m└{dashes}{suffix}\x1b[0m",)?;
+            format!("\x1b[90m└{dashes}{suffix}\x1b[0m")
         } else {
             let dashes = "─".repeat(frame_width.saturating_sub(2));
-            write!(out, "\x1b[{row};1H\x1b[2K\x1b[90m└{dashes}┘\x1b[0m",)?;
-        }
-        row += 1;
+            format!("\x1b[90m└{dashes}┘\x1b[0m")
+        };
+        frame.push(line);
     }
 
-    // Clear any remaining rows below the frame
-    if row <= term_rows {
-        write!(out, "\x1b[{row};1H\x1b[J")?;
+    frame
+}
+
+/// SGR-wrapped glyph for tu's synthetic mouse cursor. Idle = magenta `△`;
+/// held = bright-white `△` on a magenta cell.
+fn mouse_cursor_glyph(held: bool) -> &'static str {
+    if held {
+        "\x1b[1;48;5;201;97m△"
+    } else {
+        "\x1b[1;38;5;201m△"
+    }
+}
+
+/// Emit only the rows that changed vs the previously-emitted frame.
+///
+/// `needs_clear` (set on startup / session switch / error / resize) wipes
+/// the alt screen first and forces a full redraw, regardless of `prev`.
+///
+/// Note: when no diff applies (every tick, the same status line, the same
+/// content rows), this writes nothing — the user's terminal is left alone.
+/// That's what kills the flicker compared to the full-repaint version.
+fn emit_frame_diff(
+    needs_clear: bool,
+    prev: Option<&[String]>,
+    new: &[String],
+    session_name: &str,
+) -> Result<()> {
+    let mut out = io::stdout().lock();
+
+    if needs_clear {
+        write!(out, "\x1b[2J\x1b[H")?;
+        write!(out, "\x1b]0;tu monitor: {session_name}\x07")?;
+    }
+
+    let prev_len = if needs_clear {
+        // After a wipe, every row in `new` differs from "the screen" (which
+        // is now empty). Treat prev as None for the diff loop.
+        0
+    } else {
+        prev.map(|p| p.len()).unwrap_or(0)
+    };
+
+    for (i, line) in new.iter().enumerate() {
+        let unchanged = !needs_clear
+            && prev
+                .and_then(|p| p.get(i))
+                .map(|s| s == line)
+                .unwrap_or(false);
+        if unchanged {
+            continue;
+        }
+        let row = i + 1;
+        write!(out, "\x1b[{row};1H\x1b[2K{line}")?;
+    }
+
+    // If the new frame is shorter than the previous, clear what's beyond.
+    if new.len() < prev_len {
+        write!(out, "\x1b[{};1H\x1b[J", new.len() + 1)?;
     }
 
     out.flush()?;
@@ -403,7 +498,7 @@ impl RawTerminal {
 
         termios::tcsetattr(io::stdin(), termios::SetArg::TCSANOW, &raw).context("tcsetattr raw")?;
 
-        // Enter alternate screen + hide cursor
+        // Enter alternate screen + hide cursor.
         print!("\x1b[?1049h\x1b[?25l");
         io::stdout().flush()?;
 
@@ -457,7 +552,7 @@ impl RawTerminal {
 
 impl Drop for RawTerminal {
     fn drop(&mut self) {
-        // Restore terminal: show cursor + leave alternate screen
+        // Restore terminal: show cursor, leave alt screen.
         print!("\x1b[?25h\x1b[?1049l");
         let _ = io::stdout().flush();
 

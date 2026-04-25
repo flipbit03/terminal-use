@@ -1,6 +1,8 @@
 mod commands;
 mod daemon;
+mod emu;
 mod keys;
+mod mouse;
 mod output;
 mod paths;
 mod pty;
@@ -114,6 +116,10 @@ enum Command {
         /// Font size in pixels (used with --png).
         #[arg(long, default_value = "14", value_parser = parse_font_size)]
         font_size: f32,
+
+        /// Suppress the synthetic mouse-cursor overlay (used with --png).
+        #[arg(long)]
+        no_cursor: bool,
     },
 
     /// Print cursor position as row,col.
@@ -193,6 +199,12 @@ enum Command {
         /// Maximum wait time in milliseconds (default: 5000).
         #[arg(long, default_value = "5000")]
         timeout: u64,
+    },
+
+    /// Mouse input: click, drag, move, scroll, state.
+    Mouse {
+        #[command(subcommand)]
+        action: commands::mouse::MouseCmd,
     },
 
     /// Live read-only view of a session.
@@ -314,9 +326,11 @@ async fn main() {
             stdout,
             font,
             font_size,
+            no_cursor,
         } => {
             if png {
-                commands::screenshot::run_png(name, output, stdout, font, font_size).await
+                commands::screenshot::run_png(name, output, stdout, font, font_size, !no_cursor)
+                    .await
             } else {
                 commands::screenshot::run_text(name, format).await
             }
@@ -342,6 +356,8 @@ async fn main() {
         } => commands::wait::run(name, stable, text, timeout).await,
 
         Command::Monitor { name } => commands::monitor::run(name).await,
+
+        Command::Mouse { action } => commands::mouse::run(action, format).await,
     };
 
     if let Err(e) = result {

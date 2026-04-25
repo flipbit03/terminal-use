@@ -3,6 +3,7 @@ pub mod daemon_cmd;
 pub mod kill;
 pub mod list;
 pub mod monitor;
+pub mod mouse;
 pub mod paste;
 pub mod press;
 pub mod resize;
