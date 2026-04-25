@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::daemon::protocol::{Request, Response};
+use crate::daemon::protocol::{CursorPos, Request, Response};
 use crate::daemon::server::{ensure_daemon, send_request};
 
 /// Run the attach live viewer.
@@ -41,13 +41,18 @@ pub async fn run(initial_name: String) -> Result<()> {
     result
 }
 
+/// Frame interval for the live monitor. ~30fps; chosen high enough to feel
+/// fluid for drag/scroll visualization but not so high that we burn CPU.
+/// Monitor sessions are interactive and short-lived, so the extra work is fine.
+const FRAME_INTERVAL_MS: u64 = 33;
+
 async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> {
     let mut last_rows: Option<Vec<String>> = None;
     let mut last_term_size = get_terminal_size();
     let mut last_fetch = std::time::Instant::now() - Duration::from_secs(10); // force immediate first fetch
     let mut last_change = std::time::Instant::now();
 
-    let fetch_interval = Duration::from_millis(500);
+    let fetch_interval = Duration::from_millis(FRAME_INTERVAL_MS);
 
     loop {
         // Detect terminal resize → clear screen + force redraw
@@ -59,14 +64,14 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             last_fetch = std::time::Instant::now() - fetch_interval; // force refetch
         }
 
-        // Fetch screen from daemon every ~500ms
+        // Fetch + redraw at ~30fps.
         if last_fetch.elapsed() >= fetch_interval {
             last_fetch = std::time::Instant::now();
 
             let sessions = get_session_names().await.unwrap_or_default();
             if sessions.is_empty() {
                 draw_waiting_screen()?;
-                match tty.read_key(Duration::from_millis(250))? {
+                match tty.read_key(Duration::from_millis(FRAME_INTERVAL_MS))? {
                     Some(Key::Quit) => break,
                     _ => continue,
                 }
@@ -86,6 +91,8 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                     rows_ansi,
                     rows,
                     cols,
+                    mouse_cursor,
+                    mouse_held,
                 }) => {
                     let changed = last_rows.as_ref() != Some(&rows_ansi);
                     if changed {
@@ -101,6 +108,8 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                         cols,
                         term_size,
                         last_change.elapsed(),
+                        mouse_cursor,
+                        mouse_held,
                     )?;
                 }
                 Ok(Response::Error { message: _ }) => {
@@ -110,8 +119,9 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             }
         }
 
-        // Check keys every 100ms (responsive input)
-        match tty.read_key(Duration::from_millis(100))? {
+        // Poll keys with a short timeout so the frame loop stays responsive.
+        // The wake-up effectively caps redraws at FRAME_INTERVAL_MS.
+        match tty.read_key(Duration::from_millis(FRAME_INTERVAL_MS))? {
             Some(Key::Quit) => break,
             Some(Key::Left) if *current_idx > 0 => {
                 *current_idx -= 1;
@@ -222,6 +232,7 @@ fn format_elapsed(d: Duration) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_frame(
     sessions: &[String],
     active_idx: usize,
@@ -230,6 +241,8 @@ fn draw_frame(
     sess_cols: u16,
     term_size: (u16, u16),
     since_last_change: Duration,
+    mouse_cursor: Option<CursorPos>,
+    mouse_held: bool,
 ) -> Result<()> {
     let (term_cols, term_rows) = term_size;
     let mut out = io::stdout().lock();
@@ -349,8 +362,45 @@ fn draw_frame(
         write!(out, "\x1b[{row};1H\x1b[J")?;
     }
 
+    // Synthetic mouse cursor overlay: tu's last-known position lives outside
+    // any application's rendering, so we paint it on top after the inner app's
+    // own output.
+    if let Some(cursor) = mouse_cursor {
+        if cursor.col < sess_cols && cursor.row < sess_rows {
+            // Layout: status(1) + [tabs(1)] + top border(1) + content rows
+            let header_rows: u16 = if sessions.len() > 1 { 3 } else { 2 };
+            let content_first = header_rows + 1; // content[0] sits one row past the header rows
+            let term_row = content_first + cursor.row;
+            // Frame's left border occupies column 1; content starts at column 2.
+            let term_col = 2 + cursor.col;
+            // Stay inside the visible area (avoid drawing on or past the
+            // bottom-fade ellipsis or right-clip rules).
+            let max_content_row = (header_rows + sess_rows).min(term_rows);
+            let max_visible_col = if term_cols >= 2 { term_cols - 1 } else { 0 };
+            if term_row <= max_content_row && term_col <= max_visible_col + 1 {
+                let body = mouse_cursor_glyph(mouse_held);
+                write!(out, "\x1b[{term_row};{term_col}H{body}\x1b[0m")?;
+            }
+        }
+    }
+
     out.flush()?;
     Ok(())
+}
+
+/// SGR-wrapped single-cell glyph for the synthetic mouse cursor.
+///
+/// The colour is bright magenta (chosen to be uncommon in TUIs so it doesn't
+/// blend in). Held = filled block; idle = outline so the underlying cell
+/// stays partially readable.
+fn mouse_cursor_glyph(held: bool) -> &'static str {
+    if held {
+        // Bright magenta bg + bright white fg + bold + filled block.
+        "\x1b[1;48;5;201;97m█"
+    } else {
+        // Bright magenta fg, bold, hollow box. Underlying cell colour stays.
+        "\x1b[1;38;5;201m▢"
+    }
 }
 
 fn build_tab_bar(sessions: &[String], active_idx: usize) -> String {

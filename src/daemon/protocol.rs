@@ -237,12 +237,23 @@ pub enum Response {
         content_b64: String,
         rows: u16,
         cols: u16,
+        /// Synthetic mouse cursor position (None until first mouse event, or after
+        /// resize-out-of-bounds clear). Renderers can paint an overlay at this cell.
+        mouse_cursor: Option<CursorPos>,
+        /// True when at least one mouse button is currently held (Down without
+        /// matching Up). Renderers use this to switch the cursor between an outline
+        /// (idle) and a filled block (drag/press in progress).
+        mouse_held: bool,
     },
     ScreenshotCells {
         /// Each row is a vector of ANSI-rendered strings (one per row, already SGR-formatted).
         rows_ansi: Vec<String>,
         rows: u16,
         cols: u16,
+        /// Synthetic mouse cursor position (see ScreenshotAnsi).
+        mouse_cursor: Option<CursorPos>,
+        /// Whether any mouse button is currently held.
+        mouse_held: bool,
     },
     Scrollback {
         content: String,

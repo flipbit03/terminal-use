@@ -115,6 +115,10 @@ enum Command {
         /// Font size in pixels (used with --png).
         #[arg(long, default_value = "14", value_parser = parse_font_size)]
         font_size: f32,
+
+        /// Suppress the synthetic mouse-cursor overlay (used with --png).
+        #[arg(long)]
+        no_cursor: bool,
     },
 
     /// Print cursor position as row,col.
@@ -321,9 +325,11 @@ async fn main() {
             stdout,
             font,
             font_size,
+            no_cursor,
         } => {
             if png {
-                commands::screenshot::run_png(name, output, stdout, font, font_size).await
+                commands::screenshot::run_png(name, output, stdout, font, font_size, !no_cursor)
+                    .await
             } else {
                 commands::screenshot::run_text(name, format).await
             }
