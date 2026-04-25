@@ -180,19 +180,26 @@ async fn handle_connection(stream: tokio::net::UnixStream, manager: &Mutex<Sessi
 
     let is_shutdown = matches!(request, Request::Shutdown);
 
-    // Handle Wait outside the manager lock to avoid blocking other requests
-    // during the polling loop.
-    let response = if let Request::Wait {
-        name,
-        stable_ms,
-        text_pattern,
-        timeout_ms,
-    } = request
-    {
-        handle_wait(manager, &name, stable_ms, text_pattern, timeout_ms).await
-    } else {
-        let mut mgr = manager.lock().await;
-        mgr.handle(request).await
+    // Wait and Mouse run outside the manager lock so they don't block other
+    // requests. Wait polls for up to a few seconds; Mouse paces interpolated
+    // motion events with sleeps so the synthetic cursor visibly glides in
+    // `tu monitor` and the inner app sees real motion rather than a teleport.
+    let response = match request {
+        Request::Wait {
+            name,
+            stable_ms,
+            text_pattern,
+            timeout_ms,
+        } => handle_wait(manager, &name, stable_ms, text_pattern, timeout_ms).await,
+        Request::Mouse {
+            name,
+            action,
+            force,
+        } => crate::daemon::manager::handle_mouse_glided(manager, name, action, force).await,
+        other => {
+            let mut mgr = manager.lock().await;
+            mgr.handle(other).await
+        }
     };
 
     let mut json = serde_json::to_string(&response).unwrap();

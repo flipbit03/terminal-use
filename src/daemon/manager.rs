@@ -5,8 +5,8 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
 use crate::daemon::protocol::{
-    MouseAction, MouseEncoding, MouseEventKind, MouseLastEvent, MouseMode, MouseTarget, Request,
-    Response, SessionInfo, TermSize,
+    MouseAction, MouseButton, MouseEncoding, MouseEventKind, MouseLastEvent, MouseMode, MouseMods,
+    MouseTarget, Request, Response, SessionInfo, TermSize,
 };
 use crate::daemon::session::Session;
 use crate::mouse::{self, WireEvent};
@@ -66,16 +66,13 @@ impl SessionManager {
 
             Request::Resize { name, size } => self.handle_resize(&name, size).await,
 
-            Request::Mouse {
-                name,
-                action,
-                force,
-            } => self.handle_mouse(&name, action, force).await,
-
             Request::MouseState { name } => self.handle_mouse_state(&name).await,
 
-            // Wait is handled directly in server.rs to avoid holding the manager lock
+            // Wait and Mouse are handled in server.rs without the manager lock —
+            // Wait polls for seconds, Mouse paces interpolated motion events
+            // with sleeps so the synthetic cursor visibly glides on monitor.
             Request::Wait { .. } => unreachable!("Wait should be handled in server.rs"),
+            Request::Mouse { .. } => unreachable!("Mouse should be handled in server.rs"),
 
             Request::Shutdown => {
                 // Kill all sessions
@@ -377,25 +374,55 @@ impl SessionManager {
             },
         }
     }
+}
 
-    async fn handle_mouse(&mut self, name: &str, action: MouseAction, force: bool) -> Response {
-        let session = match self.sessions.get_mut(name) {
-            Some(s) => s,
-            None => {
+/// Process a Mouse request without holding the manager lock for the whole
+/// command. Click / Down / Up / Move *interpolate* a path of motion events
+/// from the synthetic cursor's current position to the target — paced with
+/// short sleeps so monitor's `△` glides instead of teleporting and the inner
+/// app sees a real-mouse-style stream of motion events.
+///
+/// Drag continues to interpolate its own from→to segment internally, after
+/// gliding cur→from. Scroll is position-independent and skips the glide.
+///
+/// The manager lock is taken briefly at start (snapshot session refs) and
+/// briefly per emit (tracker update). Between emits the lock is released so
+/// monitor's `ScreenshotCells` polls can interleave and pick up each
+/// intermediate cursor position.
+pub async fn handle_mouse_glided(
+    manager: &Mutex<SessionManager>,
+    name: String,
+    action: MouseAction,
+    force: bool,
+) -> Response {
+    use std::os::fd::OwnedFd;
+
+    // Step 1: snapshot session state under one brief lock. We dup the master
+    // fd here so we can write to the PTY between manager-lock acquisitions
+    // without keeping a session reference alive.
+    let snapshot = {
+        let mgr = manager.lock().await;
+        let Some(session) = mgr.sessions.get(&name) else {
+            return Response::Error {
+                message: format!("Session {name:?} not found"),
+            };
+        };
+        let parser = session.parser.clone();
+        let cols = session.size.cols;
+        let rows = session.size.rows;
+        let cur_pos = session.mouse.cursor;
+        let buttons_held: Vec<MouseButton> = session.mouse.buttons_held.clone();
+        let master_fd: OwnedFd = match nix::unistd::dup(&session.master_fd) {
+            Ok(fd) => fd,
+            Err(e) => {
                 return Response::Error {
-                    message: format!("Session {name:?} not found"),
+                    message: format!("dup master_fd: {e}"),
                 }
             }
         };
-
-        let cols = session.size.cols;
-        let rows = session.size.rows;
-
-        // Snapshot mouse mode/encoding and the rendered screen text under one lock
-        // so we can resolve text targets without races.
         let (mode, encoding, screen_rows) = {
-            let parser = session.parser.lock().await;
-            let screen = parser.screen();
+            let p = parser.lock().await;
+            let screen = p.screen();
             let mode = vt_mode_to_proto(screen.mouse_protocol_mode());
             let enc = vt_encoding_to_proto(screen.mouse_protocol_encoding());
             let mut text_rows = Vec::with_capacity(rows as usize);
@@ -417,70 +444,260 @@ impl SessionManager {
             }
             (mode, enc, text_rows)
         };
-
-        if !force && mode == MouseMode::None {
-            return Response::Error {
-                message: format!(
-                    "session {name:?} has not enabled mouse reporting (DECSET 1000/1002/1006). \
-                     Use --force to send raw bytes anyway."
-                ),
-            };
+        Snapshot {
+            master_fd,
+            cols,
+            rows,
+            cur_pos: cur_pos.map(|p| (p.col, p.row)),
+            buttons_held,
+            mode,
+            encoding,
+            screen_rows,
         }
+    };
 
-        // Resolve targets to coordinates.
-        let resolve = |target: &MouseTarget| -> Result<(u16, u16), String> {
-            match target {
-                MouseTarget::Coords { col, row } => {
-                    if *col >= cols || *row >= rows {
-                        return Err(format!(
-                            "coords ({col},{row}) out of bounds (terminal is {cols}x{rows})"
-                        ));
-                    }
-                    Ok((*col, *row))
-                }
-                MouseTarget::Text {
-                    needle,
-                    match_index,
-                } => {
-                    let hits = mouse::find_text(&screen_rows, needle);
-                    pick_match(&hits, *match_index, &format!("text {needle:?}"))
-                }
-                MouseTarget::Regex {
-                    pattern,
-                    match_index,
-                } => {
-                    let hits = match mouse::find_regex(&screen_rows, pattern) {
-                        Ok(h) => h,
-                        Err(e) => return Err(e.to_string()),
-                    };
-                    pick_match(&hits, *match_index, &format!("regex {pattern:?}"))
-                }
-            }
+    let Snapshot {
+        master_fd,
+        cols,
+        rows,
+        cur_pos,
+        buttons_held,
+        mode,
+        encoding,
+        screen_rows,
+    } = snapshot;
+
+    if !force && mode == MouseMode::None {
+        return Response::Error {
+            message: format!(
+                "session {name:?} has not enabled mouse reporting (DECSET 1000/1002/1006). \
+                 Use --force to send raw bytes anyway."
+            ),
         };
+    }
 
-        let events = match build_events(&action, &resolve, mode) {
-            Ok(evs) => evs,
+    // Resolve targets to coordinates against the snapshotted screen text.
+    let resolve = |target: &MouseTarget| -> Result<(u16, u16), String> {
+        match target {
+            MouseTarget::Coords { col, row } => {
+                if *col >= cols || *row >= rows {
+                    return Err(format!(
+                        "coords ({col},{row}) out of bounds (terminal is {cols}x{rows})"
+                    ));
+                }
+                Ok((*col, *row))
+            }
+            MouseTarget::Text {
+                needle,
+                match_index,
+            } => {
+                let hits = mouse::find_text(&screen_rows, needle);
+                pick_match(&hits, *match_index, &format!("text {needle:?}"))
+            }
+            MouseTarget::Regex {
+                pattern,
+                match_index,
+            } => {
+                let hits = match mouse::find_regex(&screen_rows, pattern) {
+                    Ok(h) => h,
+                    Err(e) => return Err(e.to_string()),
+                };
+                pick_match(&hits, *match_index, &format!("regex {pattern:?}"))
+            }
+        }
+    };
+
+    // Where should the synthetic cursor land BEFORE the action's own events?
+    // For most actions: at the action's target. For Drag: at its `from`.
+    // Scroll is position-independent so no pre-glide.
+    let glide_target: Option<(u16, u16)> = match &action {
+        MouseAction::Click { target, .. }
+        | MouseAction::Down { target, .. }
+        | MouseAction::Up { target, .. }
+        | MouseAction::Move { target, .. } => match resolve(target) {
+            Ok(p) => Some(p),
             Err(e) => return Response::Error { message: e },
+        },
+        MouseAction::Drag { from, .. } => match resolve(from) {
+            Ok(p) => Some(p),
+            Err(e) => return Response::Error { message: e },
+        },
+        MouseAction::Scroll { .. } => None,
+    };
+
+    // Run the glide if we have both a starting cursor and a destination.
+    if let (Some(start), Some(end)) = (cur_pos, glide_target) {
+        if start != end {
+            let path = full_path_inclusive(start.0, start.1, end.0, end.1);
+            // Skip the very first cell — that's where the cursor already sits.
+            // Include the destination cell so the cursor visibly arrives.
+            glide_cells(
+                manager,
+                &name,
+                &master_fd,
+                &path[1..],
+                &buttons_held,
+                mode,
+                encoding,
+            )
+            .await;
+        }
+    } else if cur_pos.is_none() {
+        // First-ever positional command: no glide, but we still want the
+        // cursor to land at the action's target. Skipping glide is fine —
+        // the action's own events will set the position.
+    }
+
+    // Now emit the action's own events (possibly Drag's interpolated segment,
+    // or Click's Down + Up at target, etc.). For Move there are no extra
+    // events: glide_cells already deposited the final Move at the destination.
+    if matches!(action, MouseAction::Move { .. }) {
+        return Response::Ok;
+    }
+
+    let events = match build_events(&action, &resolve, mode) {
+        Ok(evs) => evs,
+        Err(e) => return Response::Error { message: e },
+    };
+
+    let bytes = match mouse::encode(&events, encoding) {
+        Ok(b) => b,
+        Err(e) => {
+            return Response::Error {
+                message: format!("encode mouse events: {e}"),
+            }
+        }
+    };
+
+    if let Err(e) = crate::pty::input::write_to_pty(&master_fd, &bytes) {
+        return Response::Error {
+            message: format!("Mouse write failed: {e}"),
+        };
+    }
+
+    // Commit tracker update for the action's events.
+    {
+        let mut mgr = manager.lock().await;
+        if let Some(s) = mgr.sessions.get_mut(&name) {
+            update_tracker(&mut s.mouse, &events);
+        }
+    }
+
+    Response::Ok
+}
+
+struct Snapshot {
+    master_fd: std::os::fd::OwnedFd,
+    cols: u16,
+    rows: u16,
+    cur_pos: Option<(u16, u16)>,
+    buttons_held: Vec<MouseButton>,
+    mode: MouseMode,
+    encoding: MouseEncoding,
+    screen_rows: Vec<String>,
+}
+
+/// All cells along a Bresenham-like path from `(c1,r1)` to `(c2,r2)`,
+/// inclusive of both endpoints.
+fn full_path_inclusive(c1: u16, r1: u16, c2: u16, r2: u16) -> Vec<(u16, u16)> {
+    let dx = (c2 as i32 - c1 as i32).abs();
+    let dy = (r2 as i32 - r1 as i32).abs();
+    let steps = dx.max(dy);
+    if steps == 0 {
+        return vec![(c1, r1)];
+    }
+    let mut out = Vec::with_capacity((steps + 1) as usize);
+    for i in 0..=steps {
+        let t = i as f64 / steps as f64;
+        let col = (c1 as f64 + (c2 as f64 - c1 as f64) * t).round() as u16;
+        let row = (r1 as f64 + (r2 as f64 - r1 as f64) * t).round() as u16;
+        out.push((col, row));
+    }
+    out
+}
+
+/// Pace through a sequence of cells, emitting motion events on the wire (when
+/// the inner app's mouse mode supports it) and updating the per-session
+/// cursor tracker so `tu monitor` sees the synthetic cursor glide.
+///
+/// Bare motion (`Move`) is emitted on the wire only when the inner app has
+/// `AnyMotion` (DECSET 1003). With `ButtonMotion` (1002), motion is reported
+/// only when a button is held — which is the case if `buttons_held` is
+/// non-empty (e.g. a glide before a `mouse up` after a prior `mouse down`).
+/// In modes that don't report motion at all the wire emission is skipped, but
+/// the tracker still updates so the synthetic cursor still glides visually.
+async fn glide_cells(
+    manager: &Mutex<SessionManager>,
+    name: &str,
+    master_fd: &std::os::fd::OwnedFd,
+    cells: &[(u16, u16)],
+    buttons_held: &[MouseButton],
+    mode: MouseMode,
+    encoding: MouseEncoding,
+) {
+    if cells.is_empty() {
+        return;
+    }
+    // Sleep budget: ~6ms per cell, capped at 250ms total. Short enough that
+    // even a corner-to-corner glide finishes before the user's next command,
+    // long enough to be visibly fluid at 30fps.
+    let target_ms: u64 = ((cells.len() as u64) * 6).min(250);
+    let per_cell = Duration::from_millis((target_ms / cells.len() as u64).max(1));
+
+    let drag_button = buttons_held.first().copied();
+    let mods = MouseMods::default();
+
+    for &(col, row) in cells {
+        // Build the per-cell wire event (if the app's mode reports it).
+        let wire_event: Option<WireEvent> = match (mode, drag_button) {
+            (MouseMode::AnyMotion, Some(button)) => Some(WireEvent::DragMove {
+                col,
+                row,
+                button,
+                mods,
+            }),
+            (MouseMode::AnyMotion, None) => Some(WireEvent::Move { col, row, mods }),
+            (MouseMode::ButtonMotion, Some(button)) => Some(WireEvent::DragMove {
+                col,
+                row,
+                button,
+                mods,
+            }),
+            // ButtonMotion without a held button, or PressRelease/Press/None:
+            // the app doesn't expect motion here. Skip wire emission but still
+            // update the synthetic-cursor tracker so monitor glides.
+            _ => None,
         };
 
-        let bytes = match mouse::encode(&events, encoding) {
-            Ok(b) => b,
-            Err(e) => {
-                return Response::Error {
-                    message: format!("encode mouse events: {e}"),
+        if let Some(ev) = wire_event {
+            if let Ok(bytes) = mouse::encode(&[ev], encoding) {
+                let _ = crate::pty::input::write_to_pty(master_fd, &bytes);
+            }
+        }
+
+        {
+            let mut mgr = manager.lock().await;
+            if let Some(s) = mgr.sessions.get_mut(name) {
+                s.mouse.record_position(col, row);
+                if let Some(ev) = wire_event {
+                    s.mouse.last_event = Some(MouseLastEvent {
+                        kind: match ev {
+                            WireEvent::DragMove { .. } => MouseEventKind::DragMove,
+                            WireEvent::Move { .. } => MouseEventKind::Move,
+                            _ => MouseEventKind::Move,
+                        },
+                        col,
+                        row,
+                        button: drag_button,
+                        scroll_dir: None,
+                        mods,
+                        ts_unix: now_unix(),
+                    });
                 }
             }
-        };
-
-        match session.write_bytes(&bytes) {
-            Ok(()) => {
-                update_tracker(&mut session.mouse, &events);
-                Response::Ok
-            }
-            Err(e) => Response::Error {
-                message: format!("Mouse write failed: {e}"),
-            },
         }
+
+        tokio::time::sleep(per_cell).await;
     }
 }
 
