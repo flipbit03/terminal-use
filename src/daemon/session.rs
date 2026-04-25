@@ -168,22 +168,16 @@ impl Session {
     /// Get the current screen contents as plain text.
     pub async fn screenshot_text(&self) -> String {
         let parser = self.parser.lock().await;
-        let screen = parser.screen();
-        let mut lines = Vec::with_capacity(self.size.rows as usize);
-        for row in 0..self.size.rows {
-            let mut line = String::new();
-            for col in 0..self.size.cols {
-                let cell = screen.cell(row, col).unwrap();
-                let ch = cell.contents();
-                if ch.is_empty() {
-                    line.push(' ');
-                } else {
-                    push_sanitized(&mut line, ch);
-                }
-            }
-            let trimmed = line.trim_end();
-            lines.push(trimmed.to_string());
-        }
+        let mut lines: Vec<String> = parser
+            .screen()
+            .text_rows()
+            .into_iter()
+            .map(|line| {
+                let mut sanitized = String::with_capacity(line.len());
+                push_sanitized(&mut sanitized, &line);
+                sanitized.trim_end().to_string()
+            })
+            .collect();
         while lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }

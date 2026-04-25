@@ -293,28 +293,21 @@ async fn handle_wait(
     }
 }
 
-/// Read the screen contents as plain text from a parser, mirroring Session::screenshot_text().
+/// Read the screen contents as plain text from a parser, mirroring
+/// `Session::screenshot_text()` — uses the shared `Screen::text_rows`
+/// builder so wait, screenshots, and mouse target resolution all see the
+/// exact same view of the screen.
 async fn screenshot_text_from_parser(
     parser: &Mutex<crate::emu::Parser>,
-    size: &crate::daemon::protocol::TermSize,
+    _size: &crate::daemon::protocol::TermSize,
 ) -> String {
     let parser = parser.lock().await;
-    let screen = parser.screen();
-    let mut lines = Vec::with_capacity(size.rows as usize);
-    for row in 0..size.rows {
-        let mut line = String::new();
-        for col in 0..size.cols {
-            let cell = screen.cell(row, col).unwrap();
-            let ch = cell.contents();
-            if ch.is_empty() {
-                line.push(' ');
-            } else {
-                line.push_str(ch);
-            }
-        }
-        let trimmed = line.trim_end();
-        lines.push(trimmed.to_string());
-    }
+    let mut lines: Vec<String> = parser
+        .screen()
+        .text_rows()
+        .into_iter()
+        .map(|l| l.trim_end().to_string())
+        .collect();
     while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }

@@ -1,6 +1,8 @@
 # terminal-use (`tu`)
 
-Headless virtual terminal for AI agents. Spawn interactive terminal apps, read the screen, drive keyboard *and* mouse. No GUI, no X server, no display needed.
+`tu` is a full blown terminal emulator for AI agents. 
+
+Spawn interactive terminal apps, read the screen, drive the keyboard *and* mouse. No GUI, no X server, no display needed.
 
 `tu` is to terminal applications what [agent-browser](https://github.com/vercel-labs/agent-browser) is to web pages.
 
@@ -17,7 +19,7 @@ A real terminal emulator: anything that runs in your real terminal runs in `tu`.
 - **Curses / TUI apps**: vim, less, htop, mc, top, nano, lazygit, tig, ranger.
 - **Modern shell integration**: OSC 133 semantic prompts, OSC 7 working-directory hints, OSC 8 hyperlinks, APC, focus-event reporting.
 - **Terminal queries**: DA / DCS terminfo / DECRQSS replies are answered automatically, so curses apps don't hang on startup waiting for terminal capability responses.
-- **Mouse**: synthetic mouse input (click, drag, move, scroll), text-based targeting (`--on-text`, `--on-regex`), modifier keys, multi-click. Cursor glides between positions for real-mouse motion semantics.
+- **Mouse**: virtual mouse input (click, drag, move, scroll), text-based targeting (`--on-text`, `--on-regex`), modifier keys, multi-click. The virtual cursor glides between positions before each click for real-mouse motion semantics.
 - **Live monitor**: 30 fps read-only view with diff-based emission — fluid over SSH.
 
 ## Install
@@ -76,7 +78,7 @@ tu mouse click --on-text "Buy" --clicks 2          # double-click a label
 tu mouse drag 10 10 50 30                          # drag from → to
 tu mouse scroll down --amount 5
 
-# Inspect mouse state (mode, encoding, synthetic cursor, held buttons)
+# Inspect mouse state (mode, virtual cursor, held buttons)
 tu mouse state
 
 # Wait for screen state
@@ -94,7 +96,7 @@ tu monitor --name nethack         # Watch a specific session
 
 - Full-color terminal rendering inside a framed window
 - 30 fps refresh, diff-based emit — minimal bandwidth on SSH
-- Shows the synthetic mouse cursor as a magenta `△` (filled when a button is held)
+- Shows the virtual mouse cursor as a magenta `△` (filled when a button is held)
 - Left/Right arrows to switch between sessions
 - Handles terminal resize
 - Ctrl+C to detach

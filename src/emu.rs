@@ -57,17 +57,12 @@ impl Color {
     }
 }
 
-/// Mouse reporting mode the inner app has DECSET'd.
-///
-/// `Press` is exposed for protocol parity with the original `vt100`-based
-/// surface (and the `tu mouse state` JSON), but in practice alacritty does
-/// not separately track X10 press-only mode — anything that turns on click
-/// reporting is treated as press+release.
+/// Mouse reporting mode the inner app has DECSET'd. Alacritty does not
+/// separately track X10 press-only mode — anything that turns on click
+/// reporting is reported here as `PressRelease`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum MouseProtocolMode {
     None,
-    Press,
     PressRelease,
     ButtonMotion,
     AnyMotion,
@@ -274,6 +269,30 @@ impl<'a> Screen<'a> {
 
     pub fn size(&self) -> (u16, u16) {
         (self.parser.rows, self.parser.cols)
+    }
+
+    /// Visible-screen text as one `String` per row, with one Unicode character
+    /// per terminal column. Wide-char continuation cells are emitted as `' '`
+    /// so `chars().count()` of any row equals the terminal's column count —
+    /// downstream code that maps byte / char offsets to screen columns
+    /// (text targeting, regex matching, wait-for-text) won't drift.
+    pub fn text_rows(&self) -> Vec<String> {
+        let (rows, cols) = self.size();
+        let mut out = Vec::with_capacity(rows as usize);
+        for r in 0..rows {
+            let mut line = String::new();
+            for c in 0..cols {
+                let cell = self.cell(r, c);
+                match cell {
+                    Some(cell) if cell.is_wide_continuation() => line.push(' '),
+                    Some(cell) if cell.contents().is_empty() => line.push(' '),
+                    Some(cell) => line.push_str(cell.contents()),
+                    None => line.push(' '),
+                }
+            }
+            out.push(line);
+        }
+        out
     }
 
     /// Plain-text dump of visible screen + scrollback, line by line.

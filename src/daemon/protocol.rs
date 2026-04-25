@@ -171,7 +171,6 @@ pub enum MouseAction {
 #[serde(rename_all = "lowercase")]
 pub enum MouseMode {
     None,
-    Press,
     PressRelease,
     ButtonMotion,
     AnyMotion,

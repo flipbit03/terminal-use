@@ -187,7 +187,9 @@ fn draw_waiting_screen() -> Result<()> {
     let line3 = "Ctrl+C to quit";
     let box_width = 32;
     let pad_x = (cols as usize).saturating_sub(box_width) / 2;
-    let mid_row = rows / 2 - 2;
+    // saturating_sub guards against the overflow that would happen on a
+    // pathologically tiny terminal (rows < 4).
+    let mid_row = (rows / 2).saturating_sub(2).max(1);
     let p = " ".repeat(pad_x);
 
     write!(

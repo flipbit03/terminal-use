@@ -401,7 +401,10 @@ pub async fn handle_mouse_glided(
     // fd here so we can write to the PTY between manager-lock acquisitions
     // without keeping a session reference alive.
     let snapshot = {
-        let mgr = manager.lock().await;
+        let mut mgr = manager.lock().await;
+        // Reset the idle timer so a long stream of mouse activity (drag,
+        // scroll, click sequences) doesn't let the daemon time out.
+        mgr.touch();
         let Some(session) = mgr.sessions.get(&name) else {
             return Response::Error {
                 message: format!("Session {name:?} not found"),
@@ -423,26 +426,11 @@ pub async fn handle_mouse_glided(
         let (mode, encoding, screen_rows) = {
             let p = parser.lock().await;
             let screen = p.screen();
-            let mode = vt_mode_to_proto(screen.mouse_protocol_mode());
-            let enc = vt_encoding_to_proto(screen.mouse_protocol_encoding());
-            let mut text_rows = Vec::with_capacity(rows as usize);
-            for r in 0..rows {
-                let mut line = String::new();
-                for c in 0..cols {
-                    let cell = screen.cell(r, c).unwrap();
-                    if cell.is_wide_continuation() {
-                        continue;
-                    }
-                    let ch = cell.contents();
-                    if ch.is_empty() {
-                        line.push(' ');
-                    } else {
-                        line.push_str(ch);
-                    }
-                }
-                text_rows.push(line);
-            }
-            (mode, enc, text_rows)
+            (
+                vt_mode_to_proto(screen.mouse_protocol_mode()),
+                vt_encoding_to_proto(screen.mouse_protocol_encoding()),
+                screen.text_rows(),
+            )
         };
         Snapshot {
             master_fd,
@@ -803,7 +791,6 @@ fn now_unix() -> u64 {
 fn vt_mode_to_proto(mode: crate::emu::MouseProtocolMode) -> MouseMode {
     match mode {
         crate::emu::MouseProtocolMode::None => MouseMode::None,
-        crate::emu::MouseProtocolMode::Press => MouseMode::Press,
         crate::emu::MouseProtocolMode::PressRelease => MouseMode::PressRelease,
         crate::emu::MouseProtocolMode::ButtonMotion => MouseMode::ButtonMotion,
         crate::emu::MouseProtocolMode::AnyMotion => MouseMode::AnyMotion,
@@ -898,10 +885,7 @@ where
             });
         }
         Move { target, mods } => {
-            if matches!(
-                mode,
-                MouseMode::None | MouseMode::Press | MouseMode::PressRelease
-            ) {
+            if matches!(mode, MouseMode::None | MouseMode::PressRelease) {
                 return Err(format!(
                     "mouse mode {mode:?} does not report bare motion (need ButtonMotion or AnyMotion)"
                 ));
