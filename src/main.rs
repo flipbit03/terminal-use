@@ -1,5 +1,6 @@
 mod commands;
 mod daemon;
+mod emu;
 mod keys;
 mod mouse;
 mod output;

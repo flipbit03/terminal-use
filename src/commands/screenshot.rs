@@ -127,7 +127,7 @@ fn build_screenshot(
     mouse_cursor: Option<crate::daemon::protocol::CursorPos>,
     mouse_held: bool,
 ) -> Result<Screenshot> {
-    let mut parser = vt100::Parser::new(rows, cols, 0);
+    let mut parser = crate::emu::Parser::new(rows, cols, 0);
     parser.process(ansi_bytes);
 
     let screen = ScreenSnapshot::from_vt100(parser.screen());

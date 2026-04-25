@@ -108,7 +108,10 @@ impl SessionManager {
     /// Get a clone of the session's vt100 parser and its terminal size.
     /// Used by the wait handler in server.rs to read screenshots without holding
     /// the manager lock.
-    pub fn get_session_parser(&self, name: &str) -> Option<(Arc<Mutex<vt100::Parser>>, TermSize)> {
+    pub fn get_session_parser(
+        &self,
+        name: &str,
+    ) -> Option<(Arc<Mutex<crate::emu::Parser>>, TermSize)> {
         self.sessions
             .get(name)
             .map(|s| (s.parser.clone(), s.size.clone()))
@@ -580,21 +583,21 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn vt_mode_to_proto(mode: vt100::MouseProtocolMode) -> MouseMode {
+fn vt_mode_to_proto(mode: crate::emu::MouseProtocolMode) -> MouseMode {
     match mode {
-        vt100::MouseProtocolMode::None => MouseMode::None,
-        vt100::MouseProtocolMode::Press => MouseMode::Press,
-        vt100::MouseProtocolMode::PressRelease => MouseMode::PressRelease,
-        vt100::MouseProtocolMode::ButtonMotion => MouseMode::ButtonMotion,
-        vt100::MouseProtocolMode::AnyMotion => MouseMode::AnyMotion,
+        crate::emu::MouseProtocolMode::None => MouseMode::None,
+        crate::emu::MouseProtocolMode::Press => MouseMode::Press,
+        crate::emu::MouseProtocolMode::PressRelease => MouseMode::PressRelease,
+        crate::emu::MouseProtocolMode::ButtonMotion => MouseMode::ButtonMotion,
+        crate::emu::MouseProtocolMode::AnyMotion => MouseMode::AnyMotion,
     }
 }
 
-fn vt_encoding_to_proto(enc: vt100::MouseProtocolEncoding) -> MouseEncoding {
+fn vt_encoding_to_proto(enc: crate::emu::MouseProtocolEncoding) -> MouseEncoding {
     match enc {
-        vt100::MouseProtocolEncoding::Default => MouseEncoding::Default,
-        vt100::MouseProtocolEncoding::Utf8 => MouseEncoding::Utf8,
-        vt100::MouseProtocolEncoding::Sgr => MouseEncoding::Sgr,
+        crate::emu::MouseProtocolEncoding::Default => MouseEncoding::Default,
+        crate::emu::MouseProtocolEncoding::Utf8 => MouseEncoding::Utf8,
+        crate::emu::MouseProtocolEncoding::Sgr => MouseEncoding::Sgr,
     }
 }
 

@@ -55,7 +55,7 @@ pub struct Session {
     pub name: String,
     pub master_fd: OwnedFd,
     pub pid: Pid,
-    pub parser: Arc<Mutex<vt100::Parser>>,
+    pub parser: Arc<Mutex<crate::emu::Parser>>,
     pub size: TermSize,
     pub alive: bool,
     pub exit_code: Option<i32>,
@@ -77,7 +77,7 @@ impl Session {
         shell: bool,
     ) -> Result<Self> {
         let pty_proc = pty::spawn::spawn(command, args, &size, env, cwd, term, shell)?;
-        let parser = vt100::Parser::new(size.rows, size.cols, scrollback);
+        let parser = crate::emu::Parser::new(size.rows, size.cols, scrollback);
 
         Ok(Self {
             name,
@@ -95,14 +95,18 @@ impl Session {
     pub fn start_reader(&self) -> Result<()> {
         let parser = self.parser.clone();
 
-        // Duplicate the fd so the async reader owns it independently
-        let dup_fd = nix::unistd::dup(&self.master_fd).context("dup master_fd")?;
+        // Two dup'd fds: one for the async reader, one for the writeback path
+        // (parser-driven replies to terminal queries). They share the same
+        // underlying open description, so writes are atomic even though the
+        // tasks aren't synchronised at the fd level.
+        let read_fd = nix::unistd::dup(&self.master_fd).context("dup master_fd (read)")?;
+        let write_fd = nix::unistd::dup(&self.master_fd).context("dup master_fd (write)")?;
 
         tokio::spawn(async move {
             // Safety: we just dup'd the fd, so this is a valid owned fd.
-            let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd.as_raw_fd()) };
+            let std_file = unsafe { std::fs::File::from_raw_fd(read_fd.as_raw_fd()) };
             // Prevent the OwnedFd from closing separately — std_file now owns the underlying fd
-            std::mem::forget(dup_fd);
+            std::mem::forget(read_fd);
 
             let mut async_file = tokio::io::BufReader::new(tokio::fs::File::from_std(std_file));
             let mut buf = [0u8; 4096];
@@ -111,8 +115,19 @@ impl Session {
                 match async_file.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        let mut p = parser.lock().await;
-                        p.process(&buf[..n]);
+                        let pending = {
+                            let mut p = parser.lock().await;
+                            p.process(&buf[..n]);
+                            // The terminal may have queued replies (DA / cursor
+                            // position reports / DCS terminfo queries / etc.)
+                            // in response to queries from the inner app.
+                            // Forward them back to the PTY so curses apps
+                            // (vim, less, mc) don't hang waiting for them.
+                            p.take_pending_writes()
+                        };
+                        if !pending.is_empty() {
+                            let _ = crate::pty::input::write_to_pty(&write_fd, &pending);
+                        }
                     }
                     Err(e) => {
                         if e.raw_os_error() == Some(libc::EIO) {
@@ -192,8 +207,8 @@ impl Session {
 
         for row in 0..self.size.rows {
             let mut line = String::new();
-            let mut prev_fg = vt100::Color::Default;
-            let mut prev_bg = vt100::Color::Default;
+            let mut prev_fg = crate::emu::Color::Default;
+            let mut prev_bg = crate::emu::Color::Default;
             let mut prev_bold = false;
             let mut prev_inverse = false;
             let mut prev_underline = false;
@@ -358,10 +373,10 @@ fn push_sanitized(out: &mut String, content: &str) {
     }
 }
 
-fn push_fg_sgr(s: &mut String, color: vt100::Color) {
+fn push_fg_sgr(s: &mut String, color: crate::emu::Color) {
     match color {
-        vt100::Color::Default => {}
-        vt100::Color::Idx(i) => {
+        crate::emu::Color::Default => {}
+        crate::emu::Color::Idx(i) => {
             if i < 8 {
                 s.push_str(&format!(";{}", 30 + i));
             } else if i < 16 {
@@ -370,16 +385,16 @@ fn push_fg_sgr(s: &mut String, color: vt100::Color) {
                 s.push_str(&format!(";38;5;{}", i));
             }
         }
-        vt100::Color::Rgb(r, g, b) => {
+        crate::emu::Color::Rgb(r, g, b) => {
             s.push_str(&format!(";38;2;{};{};{}", r, g, b));
         }
     }
 }
 
-fn push_bg_sgr(s: &mut String, color: vt100::Color) {
+fn push_bg_sgr(s: &mut String, color: crate::emu::Color) {
     match color {
-        vt100::Color::Default => {}
-        vt100::Color::Idx(i) => {
+        crate::emu::Color::Default => {}
+        crate::emu::Color::Idx(i) => {
             if i < 8 {
                 s.push_str(&format!(";{}", 40 + i));
             } else if i < 16 {
@@ -388,7 +403,7 @@ fn push_bg_sgr(s: &mut String, color: vt100::Color) {
                 s.push_str(&format!(";48;5;{}", i));
             }
         }
-        vt100::Color::Rgb(r, g, b) => {
+        crate::emu::Color::Rgb(r, g, b) => {
             s.push_str(&format!(";48;2;{};{};{}", r, g, b));
         }
     }

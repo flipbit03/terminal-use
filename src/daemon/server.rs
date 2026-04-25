@@ -288,7 +288,7 @@ async fn handle_wait(
 
 /// Read the screen contents as plain text from a parser, mirroring Session::screenshot_text().
 async fn screenshot_text_from_parser(
-    parser: &Mutex<vt100::Parser>,
+    parser: &Mutex<crate::emu::Parser>,
     size: &crate::daemon::protocol::TermSize,
 ) -> String {
     let parser = parser.lock().await;

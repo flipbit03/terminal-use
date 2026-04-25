@@ -1,4 +1,4 @@
-/// Terminal color value, decoupled from `vt100::Color` so it can be owned, cloned, and
+/// Terminal color value, decoupled from `crate::emu::Color` so it can be owned, cloned, and
 /// used outside of a parser borrow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
@@ -10,12 +10,12 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
-impl From<vt100::Color> for Color {
-    fn from(value: vt100::Color) -> Self {
+impl From<crate::emu::Color> for Color {
+    fn from(value: crate::emu::Color) -> Self {
         match value {
-            vt100::Color::Default => Self::Default,
-            vt100::Color::Idx(idx) => Self::Indexed(idx),
-            vt100::Color::Rgb(r, g, b) => Self::Rgb(r, g, b),
+            crate::emu::Color::Default => Self::Default,
+            crate::emu::Color::Idx(idx) => Self::Indexed(idx),
+            crate::emu::Color::Rgb(r, g, b) => Self::Rgb(r, g, b),
         }
     }
 }
@@ -64,7 +64,7 @@ impl Default for Cell {
 /// An owned, `Send`-safe snapshot of the vt100 emulator's visible screen.
 ///
 /// This is the abstraction boundary between the daemon's parser (which holds a borrowed,
-/// non-`Send` `vt100::Screen`) and the render pipeline. Construct via
+/// non-`Send` `crate::emu::Screen`) and the render pipeline. Construct via
 /// [`ScreenSnapshot::from_vt100`], then pass to the text or image renderers.
 ///
 /// The grid is stored row-major: `cells[row][col]`. Dimensions are guaranteed to match
@@ -82,7 +82,7 @@ impl ScreenSnapshot {
     /// Iterates every cell in the visible area and copies its content, colors, and
     /// attributes. Cells that the parser reports as `None` (which shouldn't happen
     /// for in-bounds coordinates) are replaced with [`Cell::default`].
-    pub fn from_vt100(screen: &vt100::Screen) -> Self {
+    pub fn from_vt100(screen: crate::emu::Screen<'_>) -> Self {
         let (rows, cols) = screen.size();
         let mut cells = Vec::with_capacity(rows as usize);
 
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn builds_snapshot_from_vt100_screen() {
-        let mut parser = vt100::Parser::new(4, 10, 0);
+        let mut parser = crate::emu::Parser::new(4, 10, 0);
         parser.process(b"\x1b[31mA\x1b[7mB\x1b[0m");
 
         let snapshot = ScreenSnapshot::from_vt100(parser.screen());

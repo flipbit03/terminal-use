@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn saves_png() {
-        let mut parser = vt100::Parser::new(4, 20, 0);
+        let mut parser = crate::emu::Parser::new(4, 20, 0);
         parser.process(b"\x1b[32mhello\x1b[0m");
         let screenshot = Screenshot::new(ScreenSnapshot::from_vt100(parser.screen()));
 
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_font_size() {
-        let mut parser = vt100::Parser::new(2, 4, 0);
+        let mut parser = crate::emu::Parser::new(2, 4, 0);
         parser.process(b"hi");
         let screenshot =
             Screenshot::new(ScreenSnapshot::from_vt100(parser.screen())).font_size(0.0);
