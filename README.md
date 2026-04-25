@@ -42,6 +42,8 @@ tu self update
 
 ## Add to your agent
 
+Add the following block of text to your `CLAUDE.md`/`AGENTS.md` (or similar) to inform your agent of the existence of `tu`:
+
 ```
 # terminal-use (`tu`)
 
