@@ -72,6 +72,14 @@ pub enum Request {
         name: String,
         size: TermSize,
     },
+    Mouse {
+        name: String,
+        action: MouseAction,
+        force: bool,
+    },
+    MouseState {
+        name: String,
+    },
     Wait {
         name: String,
         stable_ms: Option<u64>,
@@ -79,6 +87,102 @@ pub enum Request {
         timeout_ms: u64,
     },
     Shutdown,
+}
+
+/// Mouse button to send.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// Modifier keys held during a mouse event.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MouseMods {
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+}
+
+/// Scroll direction for the wheel.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrollDir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// How to locate the cell to click.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum MouseTarget {
+    /// Absolute cell coordinates (0-based).
+    Coords { col: u16, row: u16 },
+    /// Find first (or nth) literal-text match on the visible screen.
+    Text { needle: String, match_index: usize },
+    /// Find first (or nth) regex match on the visible screen.
+    Regex { pattern: String, match_index: usize },
+}
+
+/// One mouse operation. Compound ops (click, drag) are expanded inside the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum MouseAction {
+    Click {
+        target: MouseTarget,
+        button: MouseButton,
+        mods: MouseMods,
+        clicks: u32,
+    },
+    Down {
+        target: MouseTarget,
+        button: MouseButton,
+        mods: MouseMods,
+    },
+    Up {
+        target: MouseTarget,
+        button: MouseButton,
+        mods: MouseMods,
+    },
+    Move {
+        target: MouseTarget,
+        mods: MouseMods,
+    },
+    Drag {
+        from: MouseTarget,
+        to: MouseTarget,
+        button: MouseButton,
+        mods: MouseMods,
+    },
+    Scroll {
+        target: Option<MouseTarget>,
+        dir: ScrollDir,
+        amount: u32,
+        mods: MouseMods,
+    },
+}
+
+/// Mouse-mode introspection: what the inner app has DECSET'd.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MouseMode {
+    None,
+    Press,
+    PressRelease,
+    ButtonMotion,
+    AnyMotion,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MouseEncoding {
+    Default,
+    Utf8,
+    Sgr,
 }
 
 /// A session's status info.
@@ -142,6 +246,10 @@ pub enum Response {
     },
     Scrollback {
         content: String,
+    },
+    MouseState {
+        mode: MouseMode,
+        encoding: MouseEncoding,
     },
     Error {
         message: String,

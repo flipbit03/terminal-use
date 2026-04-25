@@ -1,6 +1,7 @@
 mod commands;
 mod daemon;
 mod keys;
+mod mouse;
 mod output;
 mod paths;
 mod pty;
@@ -195,6 +196,12 @@ enum Command {
         timeout: u64,
     },
 
+    /// Mouse input: click, drag, move, scroll, state.
+    Mouse {
+        #[command(subcommand)]
+        action: commands::mouse::MouseCmd,
+    },
+
     /// Live read-only view of a session.
     Monitor {
         /// Session name (default: "default").
@@ -342,6 +349,8 @@ async fn main() {
         } => commands::wait::run(name, stable, text, timeout).await,
 
         Command::Monitor { name } => commands::monitor::run(name).await,
+
+        Command::Mouse { action } => commands::mouse::run(action, format).await,
     };
 
     if let Err(e) = result {
