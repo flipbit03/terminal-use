@@ -12,31 +12,29 @@ An AI agent playing NetHack — character creation, dungeon exploration, combat 
 
 https://github.com/user-attachments/assets/8dd87972-2ef5-4104-9074-52b6ee528e08
 
-## What works
+## Features
 
-A real terminal emulator: anything that runs in your real terminal runs in `tu`.
-
-- **Curses / TUI apps**: vim, less, htop, mc, top, nano, lazygit, tig, ranger.
-- **Modern shell integration**: OSC 133 semantic prompts, OSC 7 working-directory hints, OSC 8 hyperlinks, APC, focus-event reporting.
-- **Terminal queries**: DA / DCS terminfo / DECRQSS replies are answered automatically, so curses apps don't hang on startup waiting for terminal capability responses.
-- **Mouse**: virtual mouse input (click, drag, move, scroll), text-based targeting (`--on-text`, `--on-regex`), modifier keys, multi-click. The virtual cursor glides between positions before each click for real-mouse motion semantics.
-- **Live monitor**: 30 fps read-only view with diff-based emission — fluid over SSH.
+- **Screen reads**: text or PNG screenshots of the rendered terminal.
+- **Keyboard**: type text, send named keys (`Enter`, `F5`, `Ctrl+C`).
+- **Mouse**: click, drag, move, scroll. Find buttons by their label instead of pixel-hunting for coords.
+- **Wait**: block until a regex matches the screen or the screen stops changing.
+- **Sessions**: multiple terminals at once. It's basically `tmux` for your agent.
+- **Live monitor**: Want to visually check what your agent is seeing? Check the [tu monitor](#tu-monitor) command.
 
 ## Install
 
-Prebuilt binary (Linux, macOS):
-
+Prebuilt binaries available for Linux (x86_64/ARM) and macOS (ARM). One click installer, no Rust tooling needed:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/flipbit03/terminal-use/main/install.sh | sh
 ```
 
-From source:
+Or compiled directly in your box, from source:
 
 ```bash
 cargo install terminal-use
 ```
 
-To update:
+To update `tu` to the latest version (regardless of the installation method):
 
 ```bash
 tu self update
@@ -95,21 +93,31 @@ tu monitor --name nethack         # Watch a specific session
 ```
 
 - Full-color terminal rendering inside a framed window
-- 30 fps refresh, diff-based emit — minimal bandwidth on SSH
-- Shows the virtual mouse cursor as a magenta `△` (filled when a button is held)
-- Left/Right arrows to switch between sessions
+- 30 fps refresh, diff-based emit — uses minimal bandwidth / efficient on SSH
+- Shows the virtual mouse cursor (if active) as a magenta `△` (filled when a button is held)
+- Left/Right arrows to switch between multiple sessions
 - Handles terminal resize
 - Ctrl+C to detach
 
 ## How it works
 
-`tu` wraps a headless PTY + [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) emulator behind a CLI. A background daemon manages sessions — each CLI invocation is stateless.
+`tu` wraps a headless PTY + [`alacritty_terminal`](https://crates.io/crates/alacritty_terminal) emulator behind a CLI. A background daemon manages sessions — each CLI invocation is stateless. The agent driving things and the human watching share the same daemon:
 
-```
-tu CLI --> Unix socket (JSON) --> daemon --> PTY + alacritty_terminal
-                                                      ↑
-                                          replies (DA, DCS, …)
-                                          fed back to the inner app
+```mermaid
+flowchart LR
+    Agent["🤖 Agent<br/>(LLM)"] -->|"tu run · mouse · type · screenshot · wait …"| CLI["tu CLI<br/>(stateless, one-shot)"]
+    Human["👤 Human<br/>(you)"] -->|"tu monitor"| Mon["tu monitor<br/>(long-running viewer)"]
+
+    CLI <-->|"JSON · Unix socket"| Daemon
+    Mon <-.->|"JSON · Unix socket<br/>(read-only, ~30fps)"| Daemon
+
+    subgraph Daemon["tu daemon (auto-spawned, idle 8h)"]
+        Sessions["session map"]
+        Emu["alacritty_terminal<br/>+ mouse trackers"]
+        Sessions --- Emu
+    end
+
+    Daemon <-->|"PTY master fd"| App["Inner app<br/>vim · mc · htop · …"]
 ```
 
 - The emulator is alacritty's. It handles the full xterm command set, including modern shell-integration sequences.
