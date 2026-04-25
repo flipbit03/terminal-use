@@ -58,11 +58,6 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
     // Track the previous frame's row count so we can clear leftovers when
     // the new frame is shorter (e.g. switching to a smaller session).
     let mut prev_row_count: usize = 0;
-    // True the first time we observe a session after the waiting state. We
-    // give the inner app a brief moment to finish its initial paint before
-    // snapshotting — without this, a freshly-spawned mc/vim/htop is often
-    // mid-render on the first vt100 read and the user sees a partial frame.
-    let mut just_attached = true;
 
     let fetch_interval = Duration::from_millis(FRAME_INTERVAL_MS);
 
@@ -86,7 +81,6 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                 draw_waiting_screen()?;
                 needs_clear = true;
                 prev_row_count = 0;
-                just_attached = true;
                 match tty.read_key(Duration::from_millis(FRAME_INTERVAL_MS))? {
                     Some(Key::Quit) => break,
                     _ => continue,
@@ -94,15 +88,6 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
             }
             if *current_idx >= sessions.len() {
                 *current_idx = sessions.len() - 1;
-            }
-
-            // Just emerged from the waiting state — let the inner app finish
-            // its initial paint before snapshotting. mc on macOS routinely
-            // takes ~250-400ms to fully draw its panels; 400ms is a
-            // conservative buffer that still feels instant interactively.
-            if just_attached {
-                tokio::time::sleep(Duration::from_millis(400)).await;
-                just_attached = false;
             }
 
             let session_name = &sessions[*current_idx];
@@ -494,15 +479,8 @@ impl RawTerminal {
 
         termios::tcsetattr(io::stdin(), termios::SetArg::TCSANOW, &raw).context("tcsetattr raw")?;
 
-        // Enter alternate screen + hide cursor + disable autowrap.
-        //
-        // Autowrap-off (DECRST 7) matters with the diff-based emit path: if a
-        // session is wider than the user's terminal, raw cell content would
-        // overflow into the row below, and the diff would never re-clear that
-        // row when its model contents stayed "the same". With autowrap off
-        // the overflow is silently dropped and rows stay confined to their
-        // own line.
-        print!("\x1b[?1049h\x1b[?25l\x1b[?7l");
+        // Enter alternate screen + hide cursor.
+        print!("\x1b[?1049h\x1b[?25l");
         io::stdout().flush()?;
 
         Ok(Self {
@@ -555,8 +533,8 @@ impl RawTerminal {
 
 impl Drop for RawTerminal {
     fn drop(&mut self) {
-        // Restore terminal: re-enable autowrap, show cursor, leave alt screen.
-        print!("\x1b[?7h\x1b[?25h\x1b[?1049l");
+        // Restore terminal: show cursor, leave alt screen.
+        print!("\x1b[?25h\x1b[?1049l");
         let _ = io::stdout().flush();
 
         // Restore original termios
