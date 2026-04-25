@@ -227,6 +227,8 @@ fn render_screen(screen: &ScreenSnapshot, config: &ScreenshotConfig) -> Result<R
                 cur_row,
                 char_width,
                 line_height,
+                scale,
+                &font,
                 config.mouse_held,
             );
         }
@@ -238,15 +240,20 @@ fn render_screen(screen: &ScreenSnapshot, config: &ScreenshotConfig) -> Result<R
 /// tu's signature mouse-cursor magenta. Bright enough to spot at a glance,
 /// uncommon enough to avoid colliding with typical TUI palettes.
 const MOUSE_CURSOR_RGBA: Rgba<u8> = Rgba([255, 0, 200, 255]);
+const MOUSE_CURSOR_HELD_FG: Rgba<u8> = Rgba([255, 255, 255, 255]);
 
-/// Paint the synthetic mouse cursor at the given cell. `held` swaps an outline
-/// for a filled block to signal that a button is currently down.
+/// Paint the synthetic mouse cursor at the given cell as a triangular caret
+/// glyph (`^`). Idle = magenta `^` on the existing background; held =
+/// bright-white `^` on a filled magenta cell, so a held button is unmistakable.
+#[allow(clippy::too_many_arguments)]
 fn paint_mouse_cursor(
     image: &mut RgbaImage,
     cur_col: u16,
     cur_row: u16,
     char_width: f32,
     line_height: f32,
+    scale: PxScale,
+    font: &FontRef<'_>,
     held: bool,
 ) {
     let x = (cur_col as f32 * char_width).round() as i32;
@@ -254,37 +261,16 @@ fn paint_mouse_cursor(
     let w = char_width.ceil() as u32;
     let h = line_height.ceil() as u32;
 
-    if held {
-        // Filled block.
+    let glyph_color = if held {
+        // Magenta cell behind a bright-white caret.
         draw_filled_rect_mut(image, Rect::at(x, y).of_size(w, h), MOUSE_CURSOR_RGBA);
+        MOUSE_CURSOR_HELD_FG
     } else {
-        // 2-px outline so the underlying cell stays readable.
-        let thickness = 2u32.min(w.min(h).max(1));
-        // Top
-        draw_filled_rect_mut(
-            image,
-            Rect::at(x, y).of_size(w, thickness),
-            MOUSE_CURSOR_RGBA,
-        );
-        // Bottom
-        draw_filled_rect_mut(
-            image,
-            Rect::at(x, y + h.saturating_sub(thickness) as i32).of_size(w, thickness),
-            MOUSE_CURSOR_RGBA,
-        );
-        // Left
-        draw_filled_rect_mut(
-            image,
-            Rect::at(x, y).of_size(thickness, h),
-            MOUSE_CURSOR_RGBA,
-        );
-        // Right
-        draw_filled_rect_mut(
-            image,
-            Rect::at(x + w.saturating_sub(thickness) as i32, y).of_size(thickness, h),
-            MOUSE_CURSOR_RGBA,
-        );
-    }
+        // Caret on top of whatever the inner app drew.
+        MOUSE_CURSOR_RGBA
+    };
+
+    draw_text_mut(image, glyph_color, x, y, scale, font, "^");
 }
 
 #[cfg(test)]

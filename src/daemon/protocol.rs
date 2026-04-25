@@ -250,10 +250,6 @@ pub enum Response {
         rows_ansi: Vec<String>,
         rows: u16,
         cols: u16,
-        /// Synthetic mouse cursor position (see ScreenshotAnsi).
-        mouse_cursor: Option<CursorPos>,
-        /// Whether any mouse button is currently held.
-        mouse_held: bool,
     },
     Scrollback {
         content: String,
