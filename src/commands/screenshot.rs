@@ -21,18 +21,36 @@ pub async fn run_text(name: String, format: Format) -> Result<()> {
             rows,
             cols,
             cursor,
+            mouse_cursor,
+            mouse_held,
         } => {
             match format {
                 Format::Human => {
                     println!(
                         "{}",
-                        text::format_screenshot(&content, rows, cols, cursor.row, cursor.col)
+                        text::format_screenshot(
+                            &content,
+                            rows,
+                            cols,
+                            cursor.row,
+                            cursor.col,
+                            mouse_cursor,
+                            mouse_held,
+                        )
                     );
                 }
                 Format::Json => {
                     println!(
                         "{}",
-                        text::format_screenshot_json(&content, rows, cols, cursor.row, cursor.col)
+                        text::format_screenshot_json(
+                            &content,
+                            rows,
+                            cols,
+                            cursor.row,
+                            cursor.col,
+                            mouse_cursor,
+                            mouse_held,
+                        )
                     );
                 }
             }

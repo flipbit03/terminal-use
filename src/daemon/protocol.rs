@@ -223,6 +223,13 @@ pub enum Response {
         rows: u16,
         cols: u16,
         cursor: CursorPos,
+        /// Synthetic mouse cursor position (None until first mouse event;
+        /// cleared on resize-out-of-bounds). Reported as metadata only —
+        /// never spliced into `content` so regex / grep over the body stays
+        /// faithful to what the inner app drew.
+        mouse_cursor: Option<CursorPos>,
+        /// True when at least one mouse button is currently held.
+        mouse_held: bool,
     },
     Cursor {
         #[serde(flatten)]

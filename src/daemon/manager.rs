@@ -227,6 +227,8 @@ impl SessionManager {
                     rows: session.size.rows,
                     cols: session.size.cols,
                     cursor,
+                    mouse_cursor: session.mouse.cursor,
+                    mouse_held: !session.mouse.buttons_held.is_empty(),
                 }
             }
             None => Response::Error {

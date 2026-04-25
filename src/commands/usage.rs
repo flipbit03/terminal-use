@@ -47,6 +47,14 @@ COMMANDS:
   mouse scroll up|down|left|right [<col> <row>] [--amount N]
   mouse state [--name <s>]        Print mouse mode + encoding (or "disabled")
 
+MOUSE CURSOR DISPLAY:
+  When tu has a synthetic mouse cursor it shows up as a magenta △ glyph
+  (filled magenta cell when a button is held) — visible in `tu monitor`
+  and in `tu screenshot --png`. Text screenshots keep the body verbatim
+  and append `△ tu mouse cursor at (col,row)` as a trailer below the
+  rendered grid (so regex / grep over the body is never corrupted).
+  `tu mouse state` is the canonical machine-readable source.
+
 MOUSE TARGETING:
   Coords are 0-based and bounded by the current size; out-of-bounds errors out.
   --on-text / --on-regex search the visible screen left-to-right, top-to-bottom
