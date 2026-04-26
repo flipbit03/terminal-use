@@ -338,7 +338,14 @@ fn build_frame_strings(
         let left_border = if r >= fade_start { "·" } else { "│" };
 
         let mut row_str = if cropped_right {
-            format!("\x1b[90m{left_border}\x1b[0m{line}\x1b[0m")
+            // Without truncation, the daemon's `sess_cols` visible chars
+            // would exceed the user's terminal width and autowrap onto the
+            // next row, scrambling the display. Reserve 1 col for the left
+            // border + 1 col of breathing room on the right so the clip
+            // doesn't sit flush against the terminal edge.
+            let max_visible = tcols.saturating_sub(2);
+            let clipped = truncate_ansi_visible(line, max_visible);
+            format!("\x1b[90m{left_border}\x1b[0m{clipped}\x1b[0m")
         } else {
             let right_border = if r >= fade_start { "·" } else { "│" };
             format!(
@@ -385,6 +392,78 @@ fn build_frame_strings(
     }
 
     frame
+}
+
+/// Truncate an ANSI-decorated line to at most `max_visible` printable
+/// characters, copying SGR / OSC / other escape sequences verbatim. Used
+/// when the user's terminal is narrower than the session frame: without
+/// this, the daemon's `sess_cols` visible chars on each row would exceed
+/// the user's terminal width and autowrap onto the next row, scrambling
+/// neighbouring rows on every frame.
+///
+/// Visible-char counting is per Unicode scalar (one char = one column).
+/// That's accurate for ASCII / Latin / box-drawing content. CJK wide
+/// chars would over-count by one column each, but no TUIs we care about
+/// in this code path emit them.
+fn truncate_ansi_visible(line: &str, max_visible: usize) -> String {
+    if max_visible == 0 {
+        return String::new();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut visible = 0usize;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Copy the escape sequence verbatim.
+            out.push(c);
+            let Some(&next) = chars.peek() else { break };
+            chars.next();
+            out.push(next);
+            match next {
+                // CSI: parameters (0x30-0x3F) + intermediates (0x20-0x2F)
+                // + final byte (0x40-0x7E).
+                '[' => {
+                    while let Some(&p) = chars.peek() {
+                        chars.next();
+                        out.push(p);
+                        let b = p as u32;
+                        if (0x40..=0x7E).contains(&b) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: terminate on BEL (0x07) or ST (ESC \).
+                ']' => {
+                    while let Some(&p) = chars.peek() {
+                        chars.next();
+                        out.push(p);
+                        if p == '\x07' {
+                            break;
+                        }
+                        if p == '\x1b' {
+                            if let Some(&q) = chars.peek() {
+                                chars.next();
+                                out.push(q);
+                                if q == '\\' {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Other 2-char escapes (charset designators, app keypad,
+                // etc.) — already wrote both bytes.
+                _ => {}
+            }
+        } else {
+            if visible >= max_visible {
+                break;
+            }
+            out.push(c);
+            visible += 1;
+        }
+    }
+    out
 }
 
 /// SGR-wrapped glyph for tu's synthetic mouse cursor. Idle = magenta `△`;
@@ -562,5 +641,96 @@ impl Drop for RawTerminal {
             nix::sys::termios::SetArg::TCSANOW,
             &self.original_termios,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_ansi_visible;
+
+    #[test]
+    fn truncate_passes_short_lines_through_unchanged() {
+        let line = "\x1b[31mhello\x1b[0m";
+        assert_eq!(truncate_ansi_visible(line, 10), line);
+    }
+
+    #[test]
+    fn truncate_clips_visible_chars_only() {
+        // 10 visible chars total; clip to 5.
+        let line = "\x1b[31mhello\x1b[32mworld\x1b[0m";
+        let out = truncate_ansi_visible(line, 5);
+        // Should contain "hello" plus the leading SGR; the second SGR
+        // and "world" must NOT be in the output.
+        assert!(out.contains("hello"));
+        assert!(!out.contains("world"));
+        assert!(out.contains("\x1b[31m"));
+    }
+
+    #[test]
+    fn truncate_preserves_csi_state_changes_within_window() {
+        // Multiple SGR resets inside the visible window. The walker emits
+        // every escape it encounters along the way; we only stop at
+        // visible chars beyond the budget.
+        let line = "\x1b[31ma\x1b[32mb\x1b[33mc";
+        let out = truncate_ansi_visible(line, 2);
+        // Includes "a" and "b" plus their SGRs, excludes the visible 'c'.
+        assert!(out.contains("\x1b[31m"));
+        assert!(out.contains("\x1b[32m"));
+        assert!(out.contains('a'));
+        assert!(out.contains('b'));
+        assert!(!out.contains('c'));
+    }
+
+    #[test]
+    fn truncate_max_zero_returns_empty() {
+        assert_eq!(truncate_ansi_visible("\x1b[31mxxx", 0), "");
+    }
+
+    #[test]
+    fn truncate_handles_osc_with_st() {
+        // OSC 0 (set title) terminated by ST (ESC \).
+        let line = "\x1b]0;title\x1b\\hello world";
+        let out = truncate_ansi_visible(line, 5);
+        assert!(out.contains("\x1b]0;title\x1b\\"));
+        assert!(out.contains("hello"));
+        assert!(!out.contains("world"));
+    }
+
+    #[test]
+    fn truncate_handles_osc_with_bel() {
+        // OSC 0 terminated by BEL.
+        let line = "\x1b]0;title\x07hello world";
+        let out = truncate_ansi_visible(line, 5);
+        assert!(out.contains("\x1b]0;title\x07"));
+        assert!(out.contains("hello"));
+        assert!(!out.contains("world"));
+    }
+
+    #[test]
+    fn truncate_140_to_80_bounds_visible_count() {
+        // A row similar to what a 140-col app emits when monitor is 80 cols.
+        let body: String = (0..140).map(|_| 'X').collect();
+        let line = format!("\x1b[31m{body}\x1b[0m");
+        let out = truncate_ansi_visible(&line, 79);
+        // Strip SGR sequences to count visible chars.
+        let mut count = 0;
+        let mut chars = out.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                // Skip CSI sequence
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(&p) = chars.peek() {
+                        chars.next();
+                        if (p as u32) >= 0x40 && (p as u32) <= 0x7E {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                count += 1;
+            }
+        }
+        assert_eq!(count, 79);
     }
 }
