@@ -341,8 +341,9 @@ fn build_frame_strings(
             // Without truncation, the daemon's `sess_cols` visible chars
             // would exceed the user's terminal width and autowrap onto the
             // next row, scrambling the display. Reserve 1 col for the left
-            // border and clip the rest while preserving SGR state.
-            let max_visible = tcols.saturating_sub(1);
+            // border + 1 col of breathing room on the right so the clip
+            // doesn't sit flush against the terminal edge.
+            let max_visible = tcols.saturating_sub(2);
             let clipped = truncate_ansi_visible(line, max_visible);
             format!("\x1b[90m{left_border}\x1b[0m{clipped}\x1b[0m")
         } else {
