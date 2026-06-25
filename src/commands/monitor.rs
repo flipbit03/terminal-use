@@ -2,6 +2,7 @@ use std::io::{self, Read, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::daemon::protocol::{CursorPos, Request, Response};
 use crate::daemon::server::{ensure_daemon, send_request};
@@ -61,6 +62,9 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
     // This is the bulk of the flicker fix — at 30fps with a mostly-static
     // inner app, a typical tick writes the status line and nothing else.
     let mut prev_frame: Option<Vec<String>> = None;
+    // Clickable tab regions from the most recent frame, used to resolve a
+    // mouse click on the tab bar into a session switch.
+    let mut tab_hits: Vec<TabHit> = Vec::new();
 
     let fetch_interval = Duration::from_millis(FRAME_INTERVAL_MS);
 
@@ -126,11 +130,12 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                     emit_frame_diff(
                         needs_clear,
                         prev_frame.as_deref(),
-                        &new_frame,
+                        &new_frame.lines,
                         &sessions[*current_idx],
                     )?;
                     needs_clear = false;
-                    prev_frame = Some(new_frame);
+                    tab_hits = new_frame.tab_hits;
+                    prev_frame = Some(new_frame.lines);
                 }
                 Ok(Response::Error { message: _ }) => {
                     last_rows = None;
@@ -160,6 +165,27 @@ async fn run_loop(tty: &mut RawTerminal, current_idx: &mut usize) -> Result<()> 
                     needs_clear = true;
                     prev_frame = None;
                     last_fetch = std::time::Instant::now() - fetch_interval;
+                }
+            }
+            Some(Key::Click { row, col }) => {
+                // Resolve the clicked tab to a session name, then look that
+                // name up in a freshly-fetched list so a concurrent reorder
+                // can't switch to the wrong window.
+                if let Some(name) = tab_hits
+                    .iter()
+                    .find(|h| h.term_row == row && col >= h.start_col && col <= h.end_col)
+                    .map(|h| h.name.clone())
+                {
+                    let sessions = get_session_names().await.unwrap_or_default();
+                    if let Some(idx) = sessions.iter().position(|s| s == &name) {
+                        if idx != *current_idx {
+                            *current_idx = idx;
+                            last_rows = None;
+                            needs_clear = true;
+                            prev_frame = None;
+                            last_fetch = std::time::Instant::now() - fetch_interval;
+                        }
+                    }
                 }
             }
             Some(Key::Left) | None => {}
@@ -260,6 +286,14 @@ fn format_elapsed(d: Duration) -> String {
     }
 }
 
+/// A rendered monitor frame: one ANSI string per visible terminal row
+/// (index 0 = terminal row 1), plus the clickable tab regions for mouse
+/// hit-testing.
+struct Frame {
+    lines: Vec<String>,
+    tab_hits: Vec<TabHit>,
+}
+
 /// Render the current frame as a vector of ANSI strings, one per visible
 /// terminal row. Index 0 corresponds to terminal row 1.
 ///
@@ -278,33 +312,54 @@ fn build_frame_strings(
     since_last_change: Duration,
     mouse_cursor: Option<CursorPos>,
     mouse_held: bool,
-) -> Vec<String> {
+) -> Frame {
     let (term_cols, term_rows) = term_size;
+    let multi = sessions.len() > 1;
+
+    // Lay out the tab bar first: with many windows it wraps onto multiple
+    // lines, and the header height (and thus content area) depends on how
+    // many lines that takes. The tab bar starts on terminal row 2, right
+    // below the status bar.
+    let (tab_lines, tab_hits) = if multi {
+        layout_tabs(sessions, active_idx, term_cols, 2)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let frame_width = sess_cols as usize + 2;
     let tcols = term_cols as usize;
     let cropped_right = tcols < frame_width;
 
-    // Layout: status(1) + [tab bar(1)] + top border(1) + content + bottom border(1)
-    let header_rows = if sessions.len() > 1 { 3u16 } else { 2u16 };
+    // Layout: status(1) + tab bar(tab_lines) + top border(1) + content + bottom border(1)
+    let header_rows = 1 + tab_lines.len() as u16 + 1;
     let available_content_rows = term_rows.saturating_sub(header_rows + 1);
     let content_rows_to_show = sess_rows.min(available_content_rows);
     let cropped_bottom = content_rows_to_show < sess_rows;
 
     let mut frame: Vec<String> = Vec::with_capacity(term_rows as usize);
 
-    // Row 1: status bar
+    // Row 1: status bar. Clip the plain text to the terminal width *before*
+    // coloring: an un-clipped status longer than the terminal autowraps onto
+    // the tab bar row, and since the status text changes every second while
+    // the (unchanged) tab bar is skipped by the frame diff, that overflow
+    // would clobber the first tab line and never get repaired.
     let elapsed = format_elapsed(since_last_change);
-    let status = if sessions.len() > 1 {
-        format!("terminal-use monitor · last change {elapsed} · ← → switch · Ctrl+C detach")
+    let status = if multi {
+        format!("terminal-use monitor · last change {elapsed} · ← → or click · Ctrl+C detach")
     } else {
         format!("terminal-use monitor · last change {elapsed} · Ctrl+C detach")
     };
+    // Clip by display width (the status contains ambiguous-width glyphs like
+    // ← → ·), not scalar count, so it can't autowrap on wide-glyph terminals.
+    let status = truncate_ansi_visible(&status, tcols);
     frame.push(format!("\x1b[90m{status}\x1b[0m"));
 
-    // Tab bar
-    if sessions.len() > 1 {
-        frame.push(build_tab_bar(sessions, active_idx));
+    // Tab bar (one or more wrapped lines). layout_tabs wraps to fit, but a
+    // lone tab whose name exceeds the terminal width can still overflow, so
+    // clip defensively for the same no-autowrap reason as the status line.
+    for line in tab_lines {
+        let clipped = truncate_ansi_visible(&line, tcols);
+        frame.push(format!("{clipped}\x1b[0m"));
     }
 
     // Top border
@@ -391,7 +446,10 @@ fn build_frame_strings(
         frame.push(line);
     }
 
-    frame
+    Frame {
+        lines: frame,
+        tab_hits,
+    }
 }
 
 /// Truncate an ANSI-decorated line to at most `max_visible` printable
@@ -401,10 +459,11 @@ fn build_frame_strings(
 /// the user's terminal width and autowrap onto the next row, scrambling
 /// neighbouring rows on every frame.
 ///
-/// Visible-char counting is per Unicode scalar (one char = one column).
-/// That's accurate for ASCII / Latin / box-drawing content. CJK wide
-/// chars would over-count by one column each, but no TUIs we care about
-/// in this code path emit them.
+/// Visible-width counting uses `unicode-width` (display columns), so CJK
+/// wide chars count as 2 and zero-width / combining marks as 0. A char is
+/// only emitted if it fits entirely within the remaining column budget, so
+/// the result never exceeds `max_visible` columns (a wide char straddling
+/// the boundary is dropped rather than half-printed).
 fn truncate_ansi_visible(line: &str, max_visible: usize) -> String {
     if max_visible == 0 {
         return String::new();
@@ -456,11 +515,12 @@ fn truncate_ansi_visible(line: &str, max_visible: usize) -> String {
                 _ => {}
             }
         } else {
-            if visible >= max_visible {
+            let w = UnicodeWidthChar::width(c).unwrap_or(0);
+            if visible + w > max_visible {
                 break;
             }
             out.push(c);
-            visible += 1;
+            visible += w;
         }
     }
     out
@@ -527,21 +587,73 @@ fn emit_frame_diff(
     Ok(())
 }
 
-fn build_tab_bar(sessions: &[String], active_idx: usize) -> String {
-    let mut bar = String::new();
+/// A clickable tab region in the (possibly wrapped) tab bar.
+#[derive(Clone, Debug, PartialEq)]
+struct TabHit {
+    /// 1-indexed terminal row the tab label occupies.
+    term_row: u16,
+    /// 1-indexed inclusive terminal column range covered by the label
+    /// (including its one space of padding on each side).
+    start_col: u16,
+    end_col: u16,
+    /// Session name this tab selects. Stored by name (not list index) so a
+    /// click stays correct even if the session list reordered between the
+    /// frame being built and the click landing.
+    name: String,
+}
+
+/// Lay out the session tabs into one or more wrapped lines and return the
+/// rendered ANSI strings plus the click regions.
+///
+/// Tabs are packed left-to-right separated by ` │ `; when the next tab
+/// (plus its separator) would overflow `term_cols`, layout wraps to a new
+/// line. This is what lets a large window count stay visible — instead of
+/// running off the right edge, the bar grows downward like tmux's window
+/// list. `base_row` is the 1-indexed terminal row of the first tab line so
+/// the returned hits carry absolute coordinates for click hit-testing.
+fn layout_tabs(
+    sessions: &[String],
+    active_idx: usize,
+    term_cols: u16,
+    base_row: u16,
+) -> (Vec<String>, Vec<TabHit>) {
+    let max = (term_cols.max(1)) as usize;
+    let mut lines: Vec<String> = Vec::new();
+    let mut hits: Vec<TabHit> = Vec::new();
+    let mut cur = String::new();
+    let mut col = 0usize; // visible columns used so far on the current line
+
     for (i, name) in sessions.iter().enumerate() {
-        if i > 0 {
-            bar.push_str("\x1b[90m │ \x1b[0m");
+        let label_w = UnicodeWidthStr::width(name.as_str()) + 2; // " name "
+        let sep_w = if col > 0 { 3 } else { 0 }; // " │ "
+                                                 // Wrap when the tab won't fit and the current line already has
+                                                 // something on it (a lone over-wide tab is allowed to overflow).
+        if col > 0 && col + sep_w + label_w > max {
+            lines.push(std::mem::take(&mut cur));
+            col = 0;
         }
+        if col > 0 {
+            cur.push_str("\x1b[90m │ \x1b[0m");
+            col += 3;
+        }
+        let start_col = col + 1; // 1-indexed
         if i == active_idx {
             // Active: bold + inverse
-            bar.push_str(&format!("\x1b[1;7m {} \x1b[0m", name));
+            cur.push_str(&format!("\x1b[1;7m {} \x1b[0m", name));
         } else {
             // Inactive: dim
-            bar.push_str(&format!("\x1b[2m {} \x1b[0m", name));
+            cur.push_str(&format!("\x1b[2m {} \x1b[0m", name));
         }
+        col += label_w;
+        hits.push(TabHit {
+            term_row: base_row + lines.len() as u16,
+            start_col: start_col as u16,
+            end_col: col as u16, // 1-indexed inclusive
+            name: name.clone(),
+        });
     }
-    bar
+    lines.push(cur);
+    (lines, hits)
 }
 
 // --- Raw terminal handling ---
@@ -550,6 +662,11 @@ enum Key {
     Quit,
     Left,
     Right,
+    /// Left-button press at a 1-indexed terminal (row, col).
+    Click {
+        row: u16,
+        col: u16,
+    },
 }
 
 struct RawTerminal {
@@ -577,8 +694,11 @@ impl RawTerminal {
 
         termios::tcsetattr(io::stdin(), termios::SetArg::TCSANOW, &raw).context("tcsetattr raw")?;
 
-        // Enter alternate screen + hide cursor.
-        print!("\x1b[?1049h\x1b[?25l");
+        // Enter alternate screen + hide cursor, and enable mouse reporting
+        // (?1000h = button press/release tracking, ?1006h = SGR extended
+        // coordinates so columns/rows past 223 are reported). This lets the
+        // user click a tab to switch sessions, like tmux mouse mode.
+        print!("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h");
         io::stdout().flush()?;
 
         Ok(Self {
@@ -603,7 +723,9 @@ impl RawTerminal {
             return Ok(None);
         }
 
-        let mut buf = [0u8; 8];
+        // Large enough to hold a full SGR mouse report (ESC [ < b ; x ; y M),
+        // which can be ~16 bytes for three-digit coordinates.
+        let mut buf = [0u8; 32];
         let n = io::stdin().lock().read(&mut buf).unwrap_or(0);
         if n == 0 {
             return Ok(None);
@@ -612,6 +734,11 @@ impl RawTerminal {
         // Ctrl+C = 0x03, q = 0x71
         if buf[0] == 0x03 || buf[0] == b'q' {
             return Ok(Some(Key::Quit));
+        }
+
+        // SGR mouse report: ESC [ < b ; x ; y (M = press | m = release).
+        if n >= 4 && buf[0] == 0x1b && buf[1] == b'[' && buf[2] == b'<' {
+            return Ok(parse_sgr_mouse(&buf[3..n]));
         }
 
         // Arrow keys: \x1b [ C (right), \x1b [ D (left)
@@ -629,10 +756,43 @@ impl RawTerminal {
     }
 }
 
+/// Parse the body of an SGR mouse report — the bytes after `ESC [ <`, up to
+/// and including the terminating `M`/`m`. Returns a left-button *press* as a
+/// `Key::Click`; releases, non-left buttons, motion and wheel events are
+/// ignored (return `None`).
+///
+/// Only the first event in `body` is parsed: a fast click can deliver press
+/// and release coalesced into one read, so we stop at the first terminator
+/// rather than treating the whole buffer as a single (malformed) sequence.
+fn parse_sgr_mouse(body: &[u8]) -> Option<Key> {
+    let term_pos = body.iter().position(|&c| c == b'M' || c == b'm')?;
+    let is_press = body[term_pos] == b'M';
+    let nums = std::str::from_utf8(&body[..term_pos]).ok()?;
+    let mut parts = nums.split(';');
+    let button: u32 = parts.next()?.parse().ok()?;
+    let col: u16 = parts.next()?.parse().ok()?;
+    let row: u16 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None; // more than three fields → not a well-formed report
+    }
+    // SGR packs the button number into the low two bits, OR-ed with modifier
+    // flags (Shift 4, Alt 8, Ctrl 16), motion (32) and extra/wheel button
+    // bits (64, 128). Mask off only the modifier bits so a *modified* left
+    // click (e.g. Ctrl+click) still counts, while still requiring button 0
+    // and rejecting motion/wheel. Act on press only so a click switches once.
+    const MODIFIERS: u32 = 4 | 8 | 16;
+    if is_press && (button & !MODIFIERS) == 0 {
+        Some(Key::Click { row, col })
+    } else {
+        None
+    }
+}
+
 impl Drop for RawTerminal {
     fn drop(&mut self) {
-        // Restore terminal: show cursor, leave alt screen.
-        print!("\x1b[?25h\x1b[?1049l");
+        // Restore terminal: disable mouse reporting, show cursor, leave alt
+        // screen.
+        print!("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l");
         let _ = io::stdout().flush();
 
         // Restore original termios
@@ -646,7 +806,182 @@ impl Drop for RawTerminal {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_ansi_visible;
+    use super::{build_frame_strings, layout_tabs, parse_sgr_mouse, truncate_ansi_visible, Key};
+
+    fn names(n: usize) -> Vec<String> {
+        (1..=n).map(|i| format!("win{i}")).collect()
+    }
+
+    /// Count visible (printable) columns in an ANSI-decorated line, skipping
+    /// CSI escape sequences. Adequate for the box-drawing / ASCII content the
+    /// monitor emits.
+    fn visible_width(line: &str) -> usize {
+        let mut count = 0;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(&p) = chars.peek() {
+                        chars.next();
+                        if (0x40..=0x7E).contains(&(p as u32)) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn header_lines_never_exceed_terminal_width() {
+        // 15 windows in a 60-col terminal: status + wrapped tab bar. None of
+        // the rendered rows may exceed the width, or they autowrap and corrupt
+        // neighbouring rows under the frame diff.
+        let sessions = names(15);
+        let rows_ansi: Vec<String> = (0..40).map(|_| String::new()).collect();
+        let frame = build_frame_strings(
+            &sessions,
+            0,
+            &rows_ansi,
+            40,
+            120,
+            (60, 44),
+            std::time::Duration::from_secs(5),
+            None,
+            false,
+        );
+        for line in &frame.lines {
+            assert!(
+                visible_width(line) <= 60,
+                "row exceeds terminal width: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_single_line_when_it_fits() {
+        let sessions = names(3);
+        let (lines, hits) = layout_tabs(&sessions, 0, 200, 2);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(hits.len(), 3);
+        // All hits on the same (first) terminal row.
+        assert!(hits.iter().all(|h| h.term_row == 2));
+        // First tab " win1 " occupies columns 1..=6.
+        assert_eq!((hits[0].start_col, hits[0].end_col), (1, 6));
+        // Second tab follows the 3-col " │ " separator: 6 + 3 + 1 = 10.
+        assert_eq!(hits[1].start_col, 10);
+    }
+
+    #[test]
+    fn layout_wraps_when_too_many_tabs() {
+        let sessions = names(12);
+        // Narrow terminal forces wrapping onto multiple rows.
+        let (lines, hits) = layout_tabs(&sessions, 0, 30, 2);
+        assert!(
+            lines.len() > 1,
+            "expected wrapping, got {} line(s)",
+            lines.len()
+        );
+        // Every tab is represented and rows increase with wrapping.
+        assert_eq!(hits.len(), 12);
+        assert!(hits.iter().any(|h| h.term_row > 2));
+        // Hits never start past the terminal width.
+        assert!(hits.iter().all(|h| h.start_col >= 1 && h.start_col <= 30));
+        // Rows are non-decreasing in tab order.
+        for w in hits.windows(2) {
+            assert!(w[1].term_row >= w[0].term_row);
+        }
+    }
+
+    #[test]
+    fn layout_hit_columns_match_label_width() {
+        let sessions = names(1);
+        let (_lines, hits) = layout_tabs(&sessions, 0, 80, 2);
+        // " win1 " = 6 visible columns, 1-indexed inclusive.
+        assert_eq!((hits[0].start_col, hits[0].end_col), (1, 6));
+    }
+
+    #[test]
+    fn parse_left_press_returns_click() {
+        // ESC [ < 0 ; 12 ; 3 M  →  left press at col 12 row 3.
+        match parse_sgr_mouse(b"0;12;3M") {
+            Some(Key::Click { row, col }) => {
+                assert_eq!((row, col), (3, 12));
+            }
+            other => panic!("expected Click, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parse_release_is_ignored() {
+        assert!(parse_sgr_mouse(b"0;12;3m").is_none());
+    }
+
+    #[test]
+    fn parse_non_left_button_is_ignored() {
+        // Right button (2) press.
+        assert!(parse_sgr_mouse(b"2;12;3M").is_none());
+        // Wheel-up (64).
+        assert!(parse_sgr_mouse(b"64;12;3M").is_none());
+        // Left button with motion bit (32) — a drag, not a click.
+        assert!(parse_sgr_mouse(b"32;12;3M").is_none());
+    }
+
+    #[test]
+    fn parse_modified_left_click_returns_click() {
+        // Modified left presses still switch tabs: Shift (4), Alt (8),
+        // Ctrl (16), and a combination (4|8|16 = 28).
+        for b in [4u32, 8, 16, 28] {
+            match parse_sgr_mouse(format!("{b};9;2M").as_bytes()) {
+                Some(Key::Click { row, col }) => assert_eq!((row, col), (2, 9)),
+                _ => panic!("expected Click for modified left press (button {b})"),
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_counts_wide_chars_by_display_width() {
+        // Three CJK wide chars = 6 display columns. Clipping to 5 keeps only
+        // the first two (4 cols); the third would straddle the boundary.
+        let line = "日本語";
+        let out = truncate_ansi_visible(line, 5);
+        assert_eq!(out, "日本");
+        // Exact fit keeps all three.
+        assert_eq!(truncate_ansi_visible(line, 6), "日本語");
+    }
+
+    #[test]
+    fn layout_wraps_on_display_width_for_wide_names() {
+        // Two names of 6 display columns each (" name " = 8 cols) plus the
+        // 3-col separator can't share a 12-col line, so they wrap.
+        let sessions = vec!["日本語".to_string(), "한국어".to_string()];
+        let (lines, hits) = layout_tabs(&sessions, 0, 12, 2);
+        assert_eq!(lines.len(), 2, "wide names should wrap by display width");
+        assert_eq!(hits[0].term_row, 2);
+        assert_eq!(hits[1].term_row, 3);
+        // " 日本語 " = 8 display columns → cols 1..=8.
+        assert_eq!((hits[0].start_col, hits[0].end_col), (1, 8));
+    }
+
+    #[test]
+    fn parse_coalesced_press_release_takes_first() {
+        // A fast click can deliver press+release in one read; only the
+        // leading press should be acted on.
+        match parse_sgr_mouse(b"0;5;7M\x1b[<0;5;7m") {
+            Some(Key::Click { row, col }) => assert_eq!((row, col), (7, 5)),
+            _ => panic!("expected Click from leading press"),
+        }
+    }
+
+    #[test]
+    fn parse_malformed_is_ignored() {
+        assert!(parse_sgr_mouse(b"garbage").is_none());
+        assert!(parse_sgr_mouse(b"0;12M").is_none()); // too few fields
+    }
 
     #[test]
     fn truncate_passes_short_lines_through_unchanged() {

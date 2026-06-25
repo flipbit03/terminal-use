@@ -54,7 +54,7 @@ COMMANDS:
     --text <regex>                  Regex matches screen content
     --timeout <ms>                  Max wait (default: 5000)
 
-  monitor                         Live read-only view of a session (← → to switch)
+  monitor                         Live read-only view of a session (← → or click a tab to switch)
   daemon start|stop|status        Manage background daemon
   self update [--check]          Update tu to the latest version
 
