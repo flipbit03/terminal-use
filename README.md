@@ -130,6 +130,7 @@ flowchart LR
 
 - **Terminal size**: 120x40
 - **TERM**: `xterm-256color`
+- **COLORTERM**: `truecolor` (advertises 24-bit color; override with `--env COLORTERM=...`)
 - **Session name**: `default` (unless `--name` specified)
 - **Output**: Human-readable if TTY, JSON for the agent (non-interactive terminal)
 

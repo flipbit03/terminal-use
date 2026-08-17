@@ -34,7 +34,7 @@ CLI client → Unix socket (JSON-over-newline) → background daemon → per-ses
 - Follow lineark patterns: `usage` command for LLM reference, `version = "0.0.0"` patched by CI, `binary-release` feature flag.
 - `usage` ≠ `--help`. `usage` is a hand-maintained <1000 token cheatsheet for agents. `--help` is verbose clap output for humans.
 - Commands that don't need the daemon (usage, self update) are handled before daemon connection.
-- Default terminal size: 120x40, TERM=xterm-256color.
+- Default terminal size: 120x40, TERM=xterm-256color, COLORTERM=truecolor (overridable via `--env COLORTERM=...`).
 
 ## Git Commits
 

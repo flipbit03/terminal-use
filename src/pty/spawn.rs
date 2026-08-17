@@ -94,6 +94,11 @@ pub fn spawn(
             // Textual) to report the wrong size forever. TIOCGWINSZ is
             // authoritative and always current.
             std::env::set_var("TERM", term);
+            // Advertise 24-bit color: tu renders truecolor faithfully, so tell
+            // child apps that gate emission on $COLORTERM to emit it. Set
+            // before the caller's --env overrides so `--env COLORTERM=...`
+            // can still override it.
+            std::env::set_var("COLORTERM", "truecolor");
             std::env::remove_var("COLUMNS");
             std::env::remove_var("LINES");
             for (key, value) in env {
@@ -137,5 +142,55 @@ pub fn spawn(
                 pid: child,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    /// Spawn `sh -c` printing `$COLORTERM` in a PTY with the given extra env,
+    /// read the child's output until EOF, and return it as a string.
+    fn colorterm_seen_by_child(env: &[(String, String)]) -> String {
+        let size = TermSize { cols: 80, rows: 24 };
+        let proc = spawn(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                r#"printf '<%s>' "$COLORTERM""#.to_string(),
+            ],
+            &size,
+            env,
+            None,
+            "xterm-256color",
+            false,
+        )
+        .unwrap();
+
+        let mut file = std::fs::File::from(proc.master_fd);
+        let mut out = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            // On Linux the master read errors with EIO once the child exits
+            // and the slave side closes — treat any error as EOF.
+            match file.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+            }
+        }
+        let _ = nix::sys::wait::waitpid(proc.pid, None);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[test]
+    fn advertises_colorterm_truecolor_by_default() {
+        assert!(colorterm_seen_by_child(&[]).contains("<truecolor>"));
+    }
+
+    #[test]
+    fn explicit_env_overrides_colorterm() {
+        let env = vec![("COLORTERM".to_string(), "24bit".to_string())];
+        assert!(colorterm_seen_by_child(&env).contains("<24bit>"));
     }
 }

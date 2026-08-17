@@ -303,6 +303,18 @@ mod tests {
     }
 
     #[test]
+    fn truecolor_background_renders_exact_rgb() {
+        let mut parser = crate::emu::Parser::new(2, 10, 0);
+        parser.process(b"\x1b[48;2;38;35;53m   \x1b[0m");
+        let image = Screenshot::new(ScreenSnapshot::from_vt100(parser.screen()))
+            .render()
+            .unwrap();
+        // Cell (0,0) is a space with a 24-bit background — no glyph drawn on
+        // top, so a pixel inside it must be exactly the requested RGB.
+        assert_eq!(image.get_pixel(2, 2).0, [38, 35, 53, 255]);
+    }
+
+    #[test]
     fn rejects_invalid_font_size() {
         let mut parser = crate::emu::Parser::new(2, 4, 0);
         parser.process(b"hi");
