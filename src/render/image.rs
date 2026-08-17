@@ -280,11 +280,16 @@ mod tests {
     use super::Screenshot;
     use crate::render::screen::ScreenSnapshot;
 
+    /// Feed `bytes` to a fresh emulator and wrap the screen in a renderer.
+    fn shot(rows: u16, cols: u16, bytes: &[u8]) -> Screenshot {
+        let mut parser = crate::emu::Parser::new(rows, cols, 0);
+        parser.process(bytes);
+        Screenshot::new(ScreenSnapshot::from_vt100(parser.screen()))
+    }
+
     #[test]
     fn saves_png() {
-        let mut parser = crate::emu::Parser::new(4, 20, 0);
-        parser.process(b"\x1b[32mhello\x1b[0m");
-        let screenshot = Screenshot::new(ScreenSnapshot::from_vt100(parser.screen()));
+        let screenshot = shot(4, 20, b"\x1b[32mhello\x1b[0m");
 
         let base = std::env::temp_dir().join(format!(
             "tu-screenshot-test-{}",
@@ -303,11 +308,18 @@ mod tests {
     }
 
     #[test]
+    fn truecolor_background_renders_exact_rgb() {
+        let image = shot(2, 10, b"\x1b[48;2;38;35;53m   \x1b[0m")
+            .render()
+            .unwrap();
+        // Cell (0,0) is a space with a 24-bit background — no glyph drawn on
+        // top, so a pixel inside it must be exactly the requested RGB.
+        assert_eq!(image.get_pixel(2, 2).0, [38, 35, 53, 255]);
+    }
+
+    #[test]
     fn rejects_invalid_font_size() {
-        let mut parser = crate::emu::Parser::new(2, 4, 0);
-        parser.process(b"hi");
-        let screenshot =
-            Screenshot::new(ScreenSnapshot::from_vt100(parser.screen())).font_size(0.0);
+        let screenshot = shot(2, 4, b"hi").font_size(0.0);
         assert!(screenshot.render().is_err());
     }
 }

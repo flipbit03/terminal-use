@@ -364,8 +364,10 @@ fn build_frame_strings(
 
     // Top border
     {
-        let title = format!(" {} [{}x{}] ", &sessions[active_idx], sess_cols, sess_rows);
-        let prefix_width = 2 + title.len();
+        let title = format!(" {} [{}x{}] ", sessions[active_idx], sess_cols, sess_rows);
+        // Display columns, not bytes: session names are arbitrary UTF-8, and a
+        // byte count would under-fill the dashes for é/CJK/emoji names.
+        let prefix_width = 2 + title.width();
         let line = if cropped_right {
             let dash_space = tcols.saturating_sub(prefix_width);
             let (dashes, suffix) = if dash_space > 3 {
