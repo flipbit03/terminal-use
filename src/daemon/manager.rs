@@ -513,27 +513,22 @@ pub async fn handle_mouse_glided(
         MouseAction::Scroll { .. } => None,
     };
 
-    // Run the glide if we have both a starting cursor and a destination.
-    if let (Some(start), Some(end)) = (cur_pos, glide_target) {
-        if start != end {
-            let path = full_path_inclusive(start.0, start.1, end.0, end.1);
-            // Skip the very first cell — that's where the cursor already sits.
-            // Include the destination cell so the cursor visibly arrives.
-            glide_cells(
-                manager,
-                &name,
-                &master_fd,
-                &path[1..],
-                &buttons_held,
-                mode,
-                encoding,
-            )
-            .await;
-        }
-    } else if cur_pos.is_none() {
-        // First-ever positional command: no glide, but we still want the
-        // cursor to land at the action's target. Skipping glide is fine —
-        // the action's own events will set the position.
+    let path = glide_path(
+        cur_pos,
+        glide_target,
+        matches!(action, MouseAction::Move { .. }),
+    );
+    if !path.is_empty() {
+        glide_cells(
+            manager,
+            &name,
+            &master_fd,
+            &path,
+            &buttons_held,
+            mode,
+            encoding,
+        )
+        .await;
     }
 
     // Now emit the action's own events (possibly Drag's interpolated segment,
@@ -583,6 +578,31 @@ struct Snapshot {
     mode: MouseMode,
     encoding: MouseEncoding,
     screen_rows: Vec<String>,
+}
+
+/// Cells the pre-action glide should visit.
+///
+/// With a current cursor, glide along the interpolated path — skipping the
+/// start cell (the cursor already sits there), including the destination so
+/// the cursor visibly arrives.
+///
+/// With no current cursor (fresh session), Click/Down/Up/Drag need no glide:
+/// their own events land at the target and establish the tracker. But a bare
+/// `Move` emits nothing after the glide, so seed a one-cell path at the
+/// destination — otherwise the session's first `mouse move` silently no-ops
+/// (#26).
+fn glide_path(
+    cur_pos: Option<(u16, u16)>,
+    glide_target: Option<(u16, u16)>,
+    is_move: bool,
+) -> Vec<(u16, u16)> {
+    match (cur_pos, glide_target) {
+        (Some(start), Some(end)) if start != end => {
+            full_path_inclusive(start.0, start.1, end.0, end.1)[1..].to_vec()
+        }
+        (None, Some(end)) if is_move => vec![end],
+        _ => Vec::new(),
+    }
 }
 
 /// All cells along a Bresenham-like path from `(c1,r1)` to `(c2,r2)`,
@@ -1059,6 +1079,34 @@ mod tests {
         let resolve = |_: &MouseTarget| Ok((0, 0));
         let evs = build_events(&action, &resolve, MouseMode::PressRelease).unwrap();
         assert_eq!(evs.len(), 5);
+    }
+
+    #[test]
+    fn glide_path_skips_start_includes_destination() {
+        let path = glide_path(Some((0, 0)), Some((3, 0)), false);
+        assert_eq!(path, vec![(1, 0), (2, 0), (3, 0)]);
+    }
+
+    #[test]
+    fn glide_path_first_move_seeds_destination() {
+        // Fresh session (no cursor yet): a bare Move must still deposit one
+        // motion event at the destination (#26).
+        let path = glide_path(None, Some((10, 5)), true);
+        assert_eq!(path, vec![(10, 5)]);
+    }
+
+    #[test]
+    fn glide_path_first_click_needs_no_glide() {
+        // Non-Move actions emit their own events at the target, which
+        // establish the cursor — no seeding required.
+        assert!(glide_path(None, Some((10, 5)), false).is_empty());
+    }
+
+    #[test]
+    fn glide_path_same_cell_or_no_target_is_empty() {
+        assert!(glide_path(Some((4, 4)), Some((4, 4)), true).is_empty());
+        assert!(glide_path(Some((4, 4)), None, false).is_empty());
+        assert!(glide_path(None, None, true).is_empty());
     }
 
     #[test]
