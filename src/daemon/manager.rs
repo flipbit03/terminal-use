@@ -15,6 +15,7 @@ use crate::mouse::{self, WireEvent};
 pub struct SessionManager {
     sessions: HashMap<String, Session>,
     last_activity: Instant,
+    shutting_down: bool,
 }
 
 impl SessionManager {
@@ -22,6 +23,7 @@ impl SessionManager {
         Self {
             sessions: HashMap::new(),
             last_activity: Instant::now(),
+            shutting_down: false,
         }
     }
 
@@ -75,6 +77,7 @@ impl SessionManager {
             Request::Mouse { .. } => unreachable!("Mouse should be handled in server.rs"),
 
             Request::Shutdown => {
+                self.shutting_down = true;
                 // Kill all sessions
                 let names: Vec<String> = self.sessions.keys().cloned().collect();
                 for name in names {
@@ -146,6 +149,16 @@ impl SessionManager {
         term: String,
         shell: bool,
     ) -> Response {
+        // A Run accepted before Shutdown unlinked the socket may only reach us
+        // (serialized behind Shutdown on the manager lock) after the daemon is
+        // already dying — refuse instead of creating a session that would
+        // silently vanish with the process.
+        if self.shutting_down {
+            return Response::Error {
+                message: "Daemon is shutting down — retry to get a fresh daemon".into(),
+            };
+        }
+
         let session_name = self.allocate_name(name);
 
         if self.sessions.contains_key(&session_name) {
