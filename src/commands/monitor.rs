@@ -364,7 +364,7 @@ fn build_frame_strings(
 
     // Top border
     {
-        let title = format!(" {} [{}x{}] ", &sessions[active_idx], sess_cols, sess_rows);
+        let title = format!(" {} [{}x{}] ", sessions[active_idx], sess_cols, sess_rows);
         let prefix_width = 2 + title.len();
         let line = if cropped_right {
             let dash_space = tcols.saturating_sub(prefix_width);
