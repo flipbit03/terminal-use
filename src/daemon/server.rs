@@ -114,6 +114,7 @@ pub async fn run_daemon() -> Result<()> {
 
     let listener = UnixListener::bind(&sock).context("bind socket")?;
     let manager = Arc::new(Mutex::new(SessionManager::new()));
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let idle_timeout = std::env::var("TU_IDLE_TIMEOUT")
         .ok()
@@ -121,20 +122,26 @@ pub async fn run_daemon() -> Result<()> {
         .unwrap_or(28800); // 8 hours
     let idle_timeout_dur = Duration::from_secs(idle_timeout);
 
+    let mut shutdown_requested = false;
     loop {
         tokio::select! {
             result = listener.accept() => {
                 match result {
                     Ok((stream, _)) => {
                         let mgr = manager.clone();
+                        let tx = shutdown_tx.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, &mgr).await;
+                            handle_connection(stream, &mgr, tx).await;
                         });
                     }
                     Err(e) => {
                         eprintln!("accept error: {e}");
                     }
                 }
+            }
+            _ = shutdown_rx.recv() => {
+                shutdown_requested = true;
+                break;
             }
             _ = tokio::time::sleep(Duration::from_secs(10)) => {
                 let mgr = manager.lock().await;
@@ -146,12 +153,25 @@ pub async fn run_daemon() -> Result<()> {
         }
     }
 
-    let _ = std::fs::remove_file(&sock);
-    let _ = std::fs::remove_file(&pid_file);
+    // On Shutdown the connection handler already unlinked the socket (before
+    // replying), and a replacement daemon may have bound a new one since —
+    // only remove it ourselves in the idle-timeout path. Same care for the
+    // pid file: remove it only if it still holds our pid.
+    if !shutdown_requested {
+        let _ = std::fs::remove_file(&sock);
+    }
+    let my_pid = std::process::id().to_string();
+    if std::fs::read_to_string(&pid_file).is_ok_and(|c| c.trim() == my_pid) {
+        let _ = std::fs::remove_file(&pid_file);
+    }
     Ok(())
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream, manager: &Mutex<SessionManager>) {
+async fn handle_connection(
+    stream: tokio::net::UnixStream,
+    manager: &Mutex<SessionManager>,
+    shutdown_tx: tokio::sync::mpsc::Sender<()>,
+) {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
     let mut line = String::new();
@@ -202,14 +222,22 @@ async fn handle_connection(stream: tokio::net::UnixStream, manager: &Mutex<Sessi
         }
     };
 
+    // Unlink the socket before acknowledging a shutdown so no new client can
+    // connect to (and create sessions on) a dying daemon. The reply still
+    // flushes fine over the already-accepted connection.
+    if is_shutdown {
+        let _ = std::fs::remove_file(socket_path());
+    }
+
     let mut json = serde_json::to_string(&response).unwrap();
     json.push('\n');
     let _ = writer.write_all(json.as_bytes()).await;
     let _ = writer.flush().await;
 
     if is_shutdown {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        std::process::exit(0);
+        // Exit via the normal end of run_daemon (accept loop breaks, pid file
+        // cleanup runs) instead of std::process::exit(0) here.
+        let _ = shutdown_tx.send(()).await;
     }
 }
 
